@@ -1,5 +1,8 @@
 package rtmp
 
+type Message struct {
+}
+
 // import (
 // 	"bytes"
 // 	"encoding/binary"

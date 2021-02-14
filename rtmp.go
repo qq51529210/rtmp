@@ -1,5 +1,26 @@
 package rtmp
 
+const (
+	MinStreamId         = 3
+	MaxStreamId         = 65599
+	MaxMessageTimestamp = 0xffffff
+	ChunkSize           = 128
+)
+
+func putUint24(b []byte, n uint32) {
+	b[0] = byte(n >> 16)
+	b[1] = byte(n >> 8)
+	b[2] = byte(n)
+}
+
+func uint24(b []byte) uint32 {
+	return uint32(b[0])<<16 | uint32(b[1])<<8 | uint32(b[2])
+}
+
+type Stream struct {
+	Chunk map[uint32]*Chunk
+}
+
 // const (
 // 	MessageTypeSetChunkSize  = 1
 // 	MessageTypeAbort         = 2
