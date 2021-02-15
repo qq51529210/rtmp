@@ -1,449 +1,152 @@
 package rtmp
 
-type Message struct {
+import (
+	"encoding/binary"
+	"sync"
+)
+
+// 协议控制消息1-6，使用sid=0和csid=2，接收到必须立即生效。
+const (
+	ProtocolControlMessageSetChunkSize  = 1
+	ProtocolControlMessageAbort         = 2
+	ProtocolControlMessageAck           = 3
+	ProtocolControlMessageWindowAckSize = 5
+	ProtocolControlMessageSetBandWidth  = 6
+
+	MessageTypeIDControl = 4
+
+	ProtocolControlMessageSID  = 0 // 协议控制消息1-6，stream id
+	ProtocolControlMessageCSID = 2 // 协议控制消息1-6，stream id
+	ProtocolControlMessageFMT  = 3
+
+	CommandMessageCSID = 3
+
+	MessageTypeIDCmdAMF0  = 20
+	MessageTypeIDDataAMF0 = 18
+	MessageTypeIDAudio    = 8
+	MessageTypeIDVideo    = 9
+
+	ControlMessageTypeIDStreamBegin      = 0
+	ControlMessageTypeIDStreamEOF        = 1
+	ControlMessageTypeIDStreamDry        = 2
+	ControlMessageTypeIDSetBufferLength  = 3
+	ControlMessageTypeIDStreamIsRecorded = 4
+	ControlMessageTypeIDPingRequest      = 6
+	ControlMessageTypeIDPingResponse     = 7
+)
+
+var (
+	messagePool sync.Pool
+)
+
+func init() {
+	messagePool.New = func() interface{} {
+		m := new(Message)
+		return m
+	}
 }
 
-// import (
-// 	"bytes"
-// 	"encoding/binary"
-// 	"fmt"
-// 	"io"
-// 	"errors"
-// )
+type Message struct {
+	Timestamp uint32
+	TypeID    uint32
+	StreamID  uint32
+	Length    uint32
+	Data      []byte
+	FMT       byte
+	CSID      uint32
+}
 
-// /*
-//  message
+func (m *Message) resizeBuffer(n int) {
+	if cap(m.Data) >= n {
+		m.Data = m.Data[:n]
+	} else {
+		m.Data = make([]byte, n)
+	}
+}
 
-//  basic header
-//  0    1    2    3    4    5    6    7    0    1    2    3    4    5    6    7
-//  +----+----+----+----+----+----+----+----+----+----+----+----+----+----+----+----+
-//  |fmt0|csid                        					   	 |
-//  +----+----+----+----+----+----+----+----+----+----+----+----+----+----+----+----+
-//  0    1    2    3    4    5    6    7    0    1    2    3    4    5    6    7    0    1    2    3    4    5    6    7
-//  +----+----+----+----+----+----+----+----+----+----+----+----+----+----+----+----+----+----+----+----+----+----+----+----+
-//  |fmt1|csid 	                         										 |
-//  +----+----+----+----+----+----+----+----+----+----+----+----+----+----+----+----+----+----+----+----+----+----+----+----+
-//  0    1    2    3    4    5    6    7
-//  +----+----+----+----+----+----+----+----+
-//  |fmt2|csid                         	 |
-//  +----+----+----+----+----+----+----+----+
+func (m *Message) initProtocolControlMessage() {
+	m.FMT = ProtocolControlMessageFMT
+	m.CSID = ProtocolControlMessageCSID
+	m.StreamID = ProtocolControlMessageSID
+}
 
-//  message header
-//  fmt 0
-//  0    1    2    3    4    5    6    7    0    1    2    3    4    5    6    7    0    1    2    3    4    5    6    7    0    1    2    3    4    5    6    7
-//  +----+----+----+----+----+----+----+----+----+----+----+----+----+----+----+----+----+----+----+----+----+----+----+----+----+----+----+----+----+----+----+----+
-//  |timestamp           					   		   					   |message length                         |
-//  +----+----+----+----+----+----+----+----+----+----+----+----+----+----+----+----+----+----+----+----+----+----+----+----+----+----+----+----+----+----+----+----+
-//  |message length (3 bytes)     	   					   |message type id		           | msg stream id			   |
-//  +----+----+----+----+----+----+----+----+----+----+----+----+----+----+----+----+----+----+----+----+----+----+----+----+----+----+----+----+----+----+----+----+
-//  |message stream id (4 bytes)            										   |
-//  +----+----+----+----+----+----+----+----+----+----+----+----+----+----+----+----+----+----+----+----+----+----+----+----+
+// 最大块大小设置的话最少为128字节
+func (m *Message) ProtocolControlMessageSetChunkSize(size uint32) {
+	if size < ChunkSize {
+		size = ChunkSize
+	}
+	m.initProtocolControlMessage()
+	m.TypeID = ProtocolControlMessageSetChunkSize
+	m.resizeBuffer(4)
+	binary.BigEndian.PutUint32(m.Data, size)
+}
 
-//  fmt 1
-//  0    1    2    3    4    5    6    7    0    1    2    3    4    5    6    7    0    1    2    3    4    5    6    7    0    1    2    3    4    5    6    7
-//  +----+----+----+----+----+----+----+----+----+----+----+----+----+----+----+----+----+----+----+----+----+----+----+----+----+----+----+----+----+----+----+----+
-//  |timestamp           					   		   					   |message length                               |
-//  +----+----+----+----+----+----+----+----+----+----+----+----+----+----+----+----+----+----+----+----+----+----+----+----+----+----+----+----+----+----+----+----+
-//  |message length (3 bytes)     	   					    |message type id		            |
-//  +----+----+----+----+----+----+----+----+----+----+----+----+----+----+----+----+----+----+----+----+----+----+----+
+// 获取数据
+func (m *Message) GetProtocolControlMessageSetChunkSize() uint32 {
+	return binary.BigEndian.Uint32(m.Data)
+}
 
-//  fmt 2
-//  0    1    2    3    4    5    6    7    0    1    2    3    4    5    6    7    0    1    2    3    4    5    6    7    0    1    2    3    4    5    6    7
-//  +----+----+----+----+----+----+----+----+----+----+----+----+----+----+----+----+----+----+----+----+----+----+----+----+----+----+----+----+----+----+----+----+
-//  |timestamp           					   		   					    |
-//  +----+----+----+----+----+----+----+----+----+----+----+----+----+----+----+----+----+----+----+----+----+----+----+
+// 终止正在接收csid的message，消息会被丢弃。
+func (m *Message) ProtocolControlMessageAbort(csid uint32) {
+	m.initProtocolControlMessage()
+	m.TypeID = ProtocolControlMessageAbort
+	m.resizeBuffer(4)
+	binary.BigEndian.PutUint32(m.Data, csid)
+}
 
-// */
+// 获取数据
+func (m *Message) GetProtocolControlMessageAbort() uint32 {
+	return binary.BigEndian.Uint32(m.Data)
+}
 
-// func NewMessageReader(chunkSize uint32) *MessageReader {
-// 	p := new(MessageReader)
-// 	p.SetChunkSize(chunkSize)
-// 	p.message = make(map[uint32]*Message)
-// 	return p
-// }
+// 接收到等同于窗口大小的字节之后必须要发送给对端一个确认，
+// 窗口大小是指发送者在没有收到接收者确认之前发送的最大数量的字节。
+// sequenceNumber也就是目前接收到的字节数。
+func (m *Message) ProtocolControlMessageAck(sequenceNumber uint32) {
+	m.initProtocolControlMessage()
+	m.TypeID = ProtocolControlMessageAck
+	m.resizeBuffer(4)
+	binary.BigEndian.PutUint32(m.Data, sequenceNumber)
+}
 
-// type MessageReader struct {
-// 	message                map[uint32]*Message //
-// 	chunk                  []byte              //
-// 	chunkSize              uint32              //
-// 	lastChunkMessageSID    uint32              //
-// 	lastChunkMessageLength uint32              //
-// 	lastChunkMessageTypeID uint8               //
-// }
+// 获取数据
+func (m *Message) GetProtocolControlMessageAck() uint32 {
+	return binary.BigEndian.Uint32(m.Data)
+}
 
-// func (this *MessageReader) SetChunkSize(n uint32) {
-// 	if n <= 0 {
-// 		n = 128
-// 	}
-// 	this.chunkSize = n
-// 	// max basic header + Message header + extended timestamp = 3B + 11B + 4B = 18B
-// 	this.chunk = make([]byte, 18+n)
-// }
+// 通知对端的ack的窗口大小，size:窗口大小。接收端收到这条消息（或者会话建立之后），必须响应一个ProtocolControlMessageAck。
+func (m *Message) ProtocolControlMessageWindowAckSize(size uint32) {
+	m.initProtocolControlMessage()
+	m.TypeID = ProtocolControlMessageWindowAckSize
+	m.resizeBuffer(4)
+	binary.BigEndian.PutUint32(m.Data, size)
+}
 
-// func (this *MessageReader) ReadMessageFrom(r io.Reader) (*Message, int, error) {
-// 	n := 0
-// 	for {
-// 		m, n2, e := this.readMessageFrom(r)
-// 		if nil != e {
-// 			return nil, n, e
-// 		}
-// 		n += n2
-// 		if m.Length == uint32(m.Payload.Len()) {
-// 			return m, n, e
-// 		}
-// 	}
-// }
+// 获取数据
+func (m *Message) GetProtocolControlMessageWindowAckSize() uint32 {
+	return binary.BigEndian.Uint32(m.Data)
+}
 
-// func (this *MessageReader) readMessageFrom(r io.Reader) (*Message, int, error) {
-// 	n := 0
-// 	// basic header
-// 	n2, e := io.ReadFull(r, this.chunk[:1])
-// 	if nil != e {
-// 		return nil, n, e
-// 	}
-// 	n += n2
-// 	_fmt := this.chunk[0] >> 6
-// 	csid := uint32(this.chunk[0] & 0x3f)
-// 	switch csid {
-// 	case 0:
-// 		// 2
-// 		n2, e = io.ReadFull(r, this.chunk[:1])
-// 		if nil != e {
-// 			return nil, n, e
-// 		}
-// 		n += n2
-// 		csid = uint32(this.chunk[0]) + 64
-// 	case 1:
-// 		// 3
-// 		n2, e = io.ReadFull(r, this.chunk[:2])
-// 		if nil != e {
-// 			return nil, n, e
-// 		}
-// 		n += n2
-// 		csid = uint32(this.chunk[1])*256 + uint32(this.chunk[0]) + 64
-// 	}
-// 	// message
-// 	m := this.message[csid]
-// 	if nil == m {
-// 		m = NewMessage()
-// 		this.message[csid] = m
-// 	}
-// 	switch _fmt {
-// 	case 0x00:
-// 		// 11
-// 		n2, e = io.ReadFull(r, this.chunk[:11])
-// 		if nil != e {
-// 			return nil, n, e
-// 		}
-// 		n += n2
-// 		// timestamp
-// 		timestamp := ReadInt24(this.chunk[0:])
-// 		// message length
-// 		m.Length = ReadInt24(this.chunk[3:])
-// 		m.Payload.Reset()
-// 		// Message type id
-// 		m.TypeID = this.chunk[6]
-// 		// Message stream id
-// 		m.StreamID = binary.BigEndian.Uint32(this.chunk[7:])
-// 		// extended timestamp
-// 		if timestamp >= 0xffffff {
-// 			n2, e = io.ReadFull(r, this.chunk[:4])
-// 			if nil != e {
-// 				return nil, n, e
-// 			}
-// 			n += n2
-// 			m.Timestamp = binary.BigEndian.Uint32(this.chunk[0:])
-// 		} else {
-// 			m.Timestamp = timestamp
-// 		}
-// 		this.lastChunkMessageLength = m.Length
-// 		this.lastChunkMessageSID = m.StreamID
-// 		this.lastChunkMessageTypeID = m.TypeID
-// 	case 0x01:
-// 		// 7
-// 		n2, e = io.ReadFull(r, this.chunk[:7])
-// 		if nil != e {
-// 			return nil, n, e
-// 		}
-// 		n += n2
-// 		// timestamp
-// 		timestamp_delta := ReadInt24(this.chunk[0:])
-// 		// message length
-// 		m.Length = ReadInt24(this.chunk[3:])
-// 		m.Payload.Reset()
-// 		// Message type id
-// 		m.TypeID = this.chunk[6]
-// 		// extended timestamp
-// 		if timestamp_delta >= 0xffffff {
-// 			n2, e = io.ReadFull(r, this.chunk[:4])
-// 			if nil != e {
-// 				return nil, n, e
-// 			}
-// 			n += n2
-// 			m.Timestamp = binary.BigEndian.Uint32(this.chunk[0:])
-// 		} else {
-// 			m.Timestamp += timestamp_delta
-// 		}
-// 		this.lastChunkMessageLength = m.Length
-// 		this.lastChunkMessageTypeID = m.TypeID
-// 	case 0x02:
-// 		// 3
-// 		n2, e = io.ReadFull(r, this.chunk[:3])
-// 		if nil != e {
-// 			return nil, n, e
-// 		}
-// 		n += n2
-// 		// timestamp delta
-// 		timestamp_delta := ReadInt24(this.chunk[0:])
-// 		// extended timestamp
-// 		if timestamp_delta >= 0xffffff {
-// 			n2, e = io.ReadFull(r, this.chunk[:4])
-// 			if nil != e {
-// 				return nil, n, e
-// 			}
-// 			n += n2
-// 			m.Timestamp = binary.BigEndian.Uint32(this.chunk[0:])
-// 		} else {
-// 			m.Timestamp += timestamp_delta
-// 		}
-// 	case 0x03:
-// 		// 0
-// 	}
-// 	// read chunk size
-// 	tn := m.Length - uint32(m.Payload.Len())
-// 	if tn > this.chunkSize {
-// 		_, e = io.CopyN(m.Payload, r, int64(this.chunkSize))
-// 	} else if tn > 0 {
-// 		_, e = io.CopyN(m.Payload, r, int64(tn))
-// 	}
-// 	return m, n, e
-// }
+// 限制其对端的输出带宽。接收端收到这条消息，应该响应一个ProtocolControlMessageWindowAckSize。
+// limitType:0 - Hard：对端应该限制其输出带宽到指示的窗口大小。
+// 1 - Soft：对端应该限制其输出带宽到知识的窗口大小，或者已经有限制在其作用的话就取两者之间的较小值。
+// 2 - Dynamic：如果先前的限制类型为 Hard，处理这个消息就好像它被标记为 Hard，否则的话忽略这个消息
+func (m *Message) ProtocolControlMessageSetBandWidth(bandwidth uint32, limitType uint8) {
+	m.initProtocolControlMessage()
+	m.TypeID = ProtocolControlMessageSetBandWidth
+	m.resizeBuffer(5)
+	binary.BigEndian.PutUint32(m.Data, bandwidth)
+	m.Data[4] = limitType
+}
 
-// func NewMessageWriter(chunkSize uint32) *MessageWriter {
-// 	p := new(MessageWriter)
-// 	p.SetChunkSize(chunkSize)
-// 	return p
-// }
-
-// type MessageWriter struct {
-// 	chunk     []byte // chunk buffer, header and data
-// 	chunkSize uint32 // chunk real size
-// }
-
-// func (this *MessageWriter) SetChunkSize(n uint32) {
-// 	if n <= 0 {
-// 		n = 128
-// 	}
-// 	this.chunkSize = n
-// 	// max basic header + message header + extended timestamp = 3B + 11B + 4B = 18B
-// 	this.chunk = make([]byte, 18)
-// }
-
-// func (this *MessageWriter) WriteMessageTo(w io.Writer, m *Message, _fmt uint8, csid uint32) (int, error) {
-// 	// basic header
-// 	n := this.writeBasicHeader(_fmt, csid)
-// 	switch _fmt {
-// 	case 0x00:
-// 		// timestamp
-// 		if m.Timestamp >= 0xffffff {
-// 			WriteInt24(this.chunk[n:], 1)
-// 		} else {
-// 			WriteInt24(this.chunk[n:], m.Timestamp)
-// 		}
-// 		n += 3
-// 		// message length
-// 		WriteInt24(this.chunk[n:], m.Length)
-// 		n += 3
-// 		// message type id
-// 		this.chunk[n] = m.TypeID
-// 		n++
-// 		// message stream id
-// 		binary.BigEndian.PutUint32(this.chunk[n:], m.StreamID)
-// 		n += 4
-// 		if m.Timestamp >= 0xffffff {
-// 			binary.BigEndian.PutUint32(this.chunk[n:], m.Timestamp-0xffffff)
-// 			n += 4
-// 		}
-// 	case 0x01:
-// 		// timestamp
-// 		if m.Timestamp >= 0xffffff {
-// 			WriteInt24(this.chunk[n:], 1)
-// 		} else {
-// 			WriteInt24(this.chunk[n:], m.Timestamp)
-// 		}
-// 		n += 3
-// 		// message length
-// 		WriteInt24(this.chunk[n:], m.Length)
-// 		n += 3
-// 		// message type id
-// 		this.chunk[n] = m.TypeID
-// 		n++
-// 		if m.Timestamp >= 0xffffff {
-// 			binary.BigEndian.PutUint32(this.chunk[n:], m.Timestamp-0xffffff)
-// 			n += 4
-// 		}
-// 	case 0x02:
-// 		// timestamp
-// 		if m.Timestamp >= 0xffffff {
-// 			WriteInt24(this.chunk[n:], 1)
-// 		} else {
-// 			WriteInt24(this.chunk[n:], m.Timestamp)
-// 		}
-// 		n += 3
-// 		if m.Timestamp >= 0xffffff {
-// 			binary.BigEndian.PutUint32(this.chunk[n:], m.Timestamp-0xffffff)
-// 			n += 4
-// 		}
-// 	case 0x03:
-// 	default:
-// 		return n, errors.New(fmt.Sprintf("invalid basic header fmt %d", _fmt))
-// 	}
-// 	//fmt.Println(this.chunk[:n])
-// 	_, e := w.Write(this.chunk[:n])
-// 	if nil != e {
-// 		return n, e
-// 	}
-// 	if m.Payload.Len() < 1 {
-// 		return n, nil
-// 	}
-// 	// chunk data
-// 	if uint32(m.Payload.Len()) <= this.chunkSize {
-// 		n2, e := w.Write(m.Payload.Bytes())
-// 		return n + n2, e
-// 	}
-// 	d := m.Payload.Bytes()
-// 	n2, e := w.Write(d[:this.chunkSize])
-// 	if nil != e {
-// 		return n + n2, e
-// 	}
-// 	d = d[this.chunkSize:]
-// 	// fmt 3
-// 	for {
-// 		// basic header
-// 		n2 = this.writeBasicHeader(0x03, csid)
-// 		n2, e = w.Write(this.chunk[:n2])
-// 		if nil != e {
-// 			return n, e
-// 		}
-// 		n += n2
-// 		// chunk data
-// 		if uint32(len(d)) <= this.chunkSize {
-// 			n2, e := w.Write(d)
-// 			return n + n2, e
-// 		} else {
-// 			n2, e := w.Write(d[:this.chunkSize])
-// 			if nil != e {
-// 				return n + n2, e
-// 			}
-// 			n += n2
-// 			d = d[this.chunkSize:]
-// 		}
-// 	}
-// 	return n, nil
-// }
-
-// func (this *MessageWriter) writeBasicHeader(_fmt uint8, csid uint32) int {
-// 	this.chunk[0] = _fmt << 6
-// 	switch {
-// 	case csid < 64:
-// 		this.chunk[0] |= uint8(csid)
-// 		return 1
-// 	case 64 <= csid && csid < 320:
-// 		this.chunk[1] = uint8(csid - 64)
-// 		return 2
-// 	default:
-// 		this.chunk[0] |= 0x3F
-// 		binary.LittleEndian.PutUint16(this.chunk[1:], uint16(csid-64))
-// 		return 3
-// 	}
-// }
-
-// type Message struct {
-// 	TypeID    uint8  // 1B
-// 	Length    uint32 // 3B
-// 	Timestamp uint32 // 4B
-// 	StreamID  uint32 // 3B
-// 	Payload   *bytes.Buffer
-// }
-
-// func NewMessage() *Message {
-// 	m := new(Message)
-// 	m.Payload = bytes.NewBuffer(nil)
-// 	return m
-// }
-
-// func (this *Message) String() string {
-// 	return fmt.Sprintf("Message -> TypeID:%d, Length:%d, Timestamp:%d, StreamID:%d, Payload:%d", this.TypeID, this.Length, this.Timestamp, this.StreamID, this.Payload.Len())
-// }
-
-// func (this *Message) InitSetChunkSize(size uint32) {
-// 	this.Payload.Reset()
-// 	this.TypeID = MessageTypeSetChunkSize
-// 	this.Timestamp = 0
-// 	this.StreamID = 0
-// 	binary.Write(this.Payload, binary.BigEndian, size)
-// 	this.Length = uint32(this.Payload.Len())
-// }
-
-// func (this *Message) InitAbort(csid uint32) {
-// 	this.Payload.Reset()
-// 	this.TypeID = MessageTypeAbort
-// 	this.Timestamp = 0
-// 	this.StreamID = 0
-// 	binary.Write(this.Payload, binary.BigEndian, csid)
-// 	this.Length = uint32(this.Payload.Len())
-// }
-
-// func (this *Message) InitAcknowledge(sn uint32) {
-// 	this.Payload.Reset()
-// 	this.TypeID = MessageTypeACK
-// 	this.Timestamp = 0
-// 	this.StreamID = 0
-// 	binary.Write(this.Payload, binary.BigEndian, sn)
-// 	this.Length = uint32(this.Payload.Len())
-// }
-
-// func (this *Message) InitWindowAcknowledgeSize(size uint32) {
-// 	this.Payload.Reset()
-// 	this.TypeID = MessageTypeWindowAckSize
-// 	this.Timestamp = 0
-// 	this.StreamID = 0
-// 	binary.Write(this.Payload, binary.BigEndian, size)
-// 	this.Length = uint32(this.Payload.Len())
-// }
-
-// func (this *Message) InitSetBandwidth(size uint32, limit uint8) {
-// 	this.Payload.Reset()
-// 	this.TypeID = MessageTypeSetBandWidth
-// 	this.Timestamp = 0
-// 	this.StreamID = 0
-// 	binary.Write(this.Payload, binary.BigEndian, size)
-// 	this.Payload.WriteByte(limit)
-// 	this.Length = uint32(this.Payload.Len())
-// }
-
-// func (this *Message) InitStreamBegin(id uint32) {
-// 	this.Payload.Reset()
-// 	this.TypeID = MessageTypeControl
-// 	this.Timestamp = 0
-// 	binary.Write(this.Payload, binary.BigEndian, uint16(ControlMessageTypeStreamBegin))
-// 	binary.Write(this.Payload, binary.BigEndian, id)
-// 	this.Length = uint32(this.Payload.Len())
-// }
-
-// func (this *Message) InitSetBufferLength(id, ms uint32) {
-// 	this.Payload.Reset()
-// 	this.TypeID = MessageTypeControl
-// 	this.Timestamp = 0
-// 	binary.Write(this.Payload, binary.BigEndian, uint16(ControlMessageTypeSetBufferLength))
-// 	binary.Write(this.Payload, binary.BigEndian, id)
-// 	binary.Write(this.Payload, binary.BigEndian, ms)
-// 	this.Length = uint32(this.Payload.Len())
-// }
+// 获取数据
+func (m *Message) GetProtocolControlMessageSetBandWidth() (uint32, uint8) {
+	return binary.BigEndian.Uint32(m.Data)
+}
 
 // func (this *Message) InitAMF0(name string, tid float64, cmd, info interface{}) {
 // 	this.Payload.Reset()
-// 	this.TypeID = MessageTypeCmdAMF0
+// 	this.TypeID = MessageTypeIDCmdAMF0
 // 	this.Timestamp = 0
 // 	WriteAMF(this.Payload, name)
 // 	WriteAMF(this.Payload, tid)
