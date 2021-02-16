@@ -15,7 +15,7 @@ import (
 )
 
 const (
-	RTMP_PROTO_VERSION          = 3
+	rtmpProtoVersion            = 3
 	handshakeBufferLen          = 1537
 	handshakeRandomLen          = handshakeBufferLen - 9
 	handshakeKeyLen             = 128
@@ -179,7 +179,7 @@ func HandshakeAccept(conn io.ReadWriter, version uint32) (uint32, error) {
 		return 0, err
 	}
 	// c0 protocol version
-	if buff[handshakeProtocolVersion] != RTMP_PROTO_VERSION {
+	if buff[handshakeProtocolVersion] != rtmpProtoVersion {
 		return 0, fmt.Errorf("invalid protocol version <%d>", buff[handshakeProtocolVersion])
 	}
 	// c1 version
@@ -312,7 +312,7 @@ func HandshakeDial(conn io.ReadWriter, version uint32) (uint32, error) {
 	}
 	var buff [handshakeBufferLen]byte
 	// c0 protocal version
-	buff[handshakeProtocolVersion] = RTMP_PROTO_VERSION
+	buff[handshakeProtocolVersion] = rtmpProtoVersion
 	// c1 time
 	c1Time := uint32(time.Now().Unix())
 	binary.BigEndian.PutUint32(buff[handshakeTime1:], c1Time)
@@ -333,7 +333,7 @@ func HandshakeDial(conn io.ReadWriter, version uint32) (uint32, error) {
 		return 0, err
 	}
 	// s0 protocol version
-	if buff[handshakeProtocolVersion] != RTMP_PROTO_VERSION {
+	if buff[handshakeProtocolVersion] != rtmpProtoVersion {
 		return 0, fmt.Errorf("invalid protocol version <%d>", buff[handshakeProtocolVersion])
 	}
 	// s1 time，在c2 time1中发送
@@ -375,7 +375,7 @@ func HandshakeDial(conn io.ReadWriter, version uint32) (uint32, error) {
 func handshakeComplexDial(conn io.ReadWriter, version uint32) (uint32, error) {
 	var buff [handshakeBufferLen]byte
 	// c0 protocal version
-	buff[handshakeProtocolVersion] = RTMP_PROTO_VERSION
+	buff[handshakeProtocolVersion] = rtmpProtoVersion
 	// c1 time
 	c1Time := uint32(time.Now().Unix())
 	binary.BigEndian.PutUint32(buff[handshakeTime1:], c1Time)
