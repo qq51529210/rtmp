@@ -16,6 +16,7 @@ const (
 	amfObject     = 3
 	amfNull       = 5
 	amfEcmaArray  = 8
+	amfObjectEnd  = 9
 	amfLongString = 12
 )
 
@@ -305,7 +306,7 @@ func writeAMFObject(conn io.Writer, obj map[string]interface{}) (err error) {
 		}
 	}
 	var b [3]byte
-	b[2] = AMF_OBJECT_END
+	b[2] = amfObjectEnd
 	_, err = conn.Write(b[:])
 	return
 }

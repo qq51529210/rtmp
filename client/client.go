@@ -1,4 +1,4 @@
-package rtmp
+package main
 
 type Client struct {
 }

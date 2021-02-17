@@ -19,11 +19,3 @@ func putLittleEndianUint24(b []byte, n uint32) {
 func littleEndianUint24(b []byte) uint32 {
 	return uint32(b[0]) | uint32(b[1])<<8 | uint32(b[2]<<16)
 }
-
-func Publish() {
-
-}
-
-func Play() {
-
-}
