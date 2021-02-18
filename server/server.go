@@ -40,9 +40,12 @@ func (s *Server) Listen() (err error) {
 			c := new(Conn)
 			c.server = s
 			c.conn = bufio.NewReadWriter(bufio.NewReader(conn), bufio.NewWriter(conn))
-			err := c.MessageReader.Read(c.conn, c.handleMessage)
+			err := c.MessageHandler.Read(c.conn, c.handleMessage)
 			if err != nil {
 				log.Error(err)
+			}
+			if c.publishStream != nil {
+				s.DeleteStream(c.connectUrl.Path)
 			}
 		}(conn)
 	}
@@ -61,8 +64,20 @@ func (s *Server) AddStream(name string) (*AVStream, bool) {
 	stream, ok := s.stream[name]
 	if !ok {
 		stream = new(AVStream)
+		stream.lock = sync.NewCond(&sync.Mutex{})
 		stream.Valid = true
 	}
 	s.streamMutex.Unlock()
 	return stream, ok
+}
+
+func (s *Server) DeleteStream(name string) {
+	s.streamMutex.Lock()
+	stream, ok := s.stream[name]
+	if ok {
+		delete(s.stream, name)
+		stream.Valid = false
+		stream.lock.Broadcast()
+	}
+	s.streamMutex.Unlock()
 }

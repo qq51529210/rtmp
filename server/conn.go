@@ -5,10 +5,10 @@ import (
 	"encoding/binary"
 	"fmt"
 	"net/url"
-	"path"
 	"reflect"
 	"sync"
 
+	"github.com/qq51529210/log"
 	"github.com/qq51529210/rtmp"
 )
 
@@ -36,8 +36,35 @@ type Conn struct {
 }
 
 func (c *Conn) play(stream *AVStream) {
+	var err error
+	var chunk rtmp.ChunkHeader
+	chunk.MessageStreamID = c.streamID
+	data := stream.GetData(nil)
 	for stream.Valid {
-
+		if data.IsVideo {
+			chunk.MessageTypeID = rtmp.VideoMessage
+		} else {
+			chunk.MessageTypeID = rtmp.AudioMessage
+		}
+		chunk.MessageTimestamp = data.Timestamp
+		if chunk.MessageTimestamp >= rtmp.MaxMessageTimestamp {
+			chunk.MessageTimestamp = rtmp.MaxMessageTimestamp
+			chunk.ExtendedTimestamp = data.Timestamp
+		}
+		err = rtmp.WriteMessage(c.conn, c.MessageHandler.RemoteChunkSize, &chunk, data.Data)
+		if err != nil {
+			log.Error(err)
+			break
+		}
+		err = c.conn.Flush()
+		if err != nil {
+			log.Error(err)
+			break
+		}
+		data = stream.GetData(data)
+	}
+	if data != nil {
+		data.Done()
 	}
 }
 
@@ -218,7 +245,7 @@ func (c *Conn) handleCommandMessagePublish(msg *rtmp.Message) (err error) {
 			"description": "server only support live",
 		})
 	} else {
-		c.publishStream, ok = c.server.AddStream(path.Base(c.connectUrl.Path))
+		c.publishStream, ok = c.server.AddStream(c.connectUrl.Path)
 		if !ok {
 			// 已经有相同的流
 			msg.InitCommandMessage("onStatus", tid, nil, map[string]string{
@@ -421,7 +448,7 @@ func (c *Conn) handleCommandMessagePlay(msg *rtmp.Message) (err error) {
 			return fmt.Errorf("command message.'play'.'reset' invalid data type <%s>", reflect.TypeOf(amf).Kind().String())
 		}
 	}
-	stream := c.server.GetStream(path.Base(c.connectUrl.Path))
+	stream := c.server.GetStream(c.connectUrl.Path)
 	if stream == nil {
 		msg.InitCommandMessage("onStatus", 0, nil, map[string]string{
 			"level": "error",

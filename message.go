@@ -52,6 +52,43 @@ type Message struct {
 	Data      bytes.Buffer // 消息的数据
 }
 
+func WriteMessage(w io.Writer, chunkSize int, chunk *ChunkHeader, data []byte) error {
+	// 第一个chunk
+	chunk.FMT = 0
+	chunk.MessageLength = uint32(len(data))
+	err := chunk.Write(w)
+	if err != nil {
+		return err
+	}
+	n := len(data)
+	if n > chunkSize {
+		n = chunkSize
+	}
+	_, err = w.Write(data[:n])
+	if err != nil {
+		return err
+	}
+	data = data[n:]
+	// 其他的chunk
+	chunk.FMT = 3
+	for len(data) > 0 {
+		err = chunk.Write(w)
+		if err != nil {
+			return err
+		}
+		n = len(data)
+		if n > chunkSize {
+			n = chunkSize
+		}
+		_, err = w.Write(data[:n])
+		if err != nil {
+			return err
+		}
+		data = data[n:]
+	}
+	return nil
+}
+
 func (m *Message) Write(w io.Writer, chunkSize int) error {
 	var chunk ChunkHeader
 	// 第一个chunk
