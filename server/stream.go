@@ -1,71 +1,92 @@
 package main
 
 import (
+	"container/list"
 	"sync"
-	"sync/atomic"
 )
 
 var (
-	avBlockPool sync.Pool
+	StreamDataPool sync.Pool
 )
 
 func init() {
-	avBlockPool.New = func() interface{} {
-		return new(AVBlock)
+	StreamDataPool.New = func() interface{} {
+		return new(StreamData)
+	}
+}
+
+func PutStreamData(d *StreamData) {
+	d.count--
+	if d.count == 0 {
+		StreamDataPool.Put(d)
 	}
 }
 
 // 表示一块音/视频数据
-type AVBlock struct {
-	IsVideo   bool     // 音/视频
-	Timestamp uint32   // 时间戳
-	Data      []byte   // 数据
-	Next      *AVBlock // 下一块数据
-	count     int32    // 智能指针
-}
-
-func (b *AVBlock) Done() {
-	if atomic.AddInt32(&b.count, -1) == 0 {
-		avBlockPool.Put(b)
-	}
+type StreamData struct {
+	IsVideo   bool        // 音/视频
+	Timestamp uint32      // 时间戳
+	Data      []byte      // 数据
+	Next      *StreamData // 下一块数据
+	count     int32       // 智能指针
 }
 
 // 表示一块连续的音/视频数据块缓存
-type AVStream struct {
-	lock      *sync.Cond
+type Stream struct {
+	lock      sync.RWMutex
 	Valid     bool
 	timestamp uint32
-	head      *AVBlock
-	tail      *AVBlock
+	head      *StreamData
+	tail      *StreamData
+	play      list.List
 }
 
-func (s *AVStream) GetData(prev *AVBlock) *AVBlock {
-	if prev != nil {
-		prev.Done()
-	}
-	s.lock.L.Lock()
-	for prev == s.tail {
-		s.lock.Wait()
-	}
-	s.lock.L.Unlock()
-	atomic.AddInt32(&s.tail.count, 1)
-	return s.tail
-}
-
-func (s *AVStream) AddData(isVideo bool, timestamp uint32, data []byte) {
-	b := avBlockPool.Get().(*AVBlock)
+func (s *Stream) AddData(isVideo bool, timestamp uint32, data []byte) {
+	b := StreamDataPool.Get().(*StreamData)
 	b.count = 1
 	b.IsVideo = isVideo
 	b.Timestamp = timestamp
 	b.Data = b.Data[:0]
 	b.Data = append(b.Data, data...)
-	s.lock.L.Lock()
+	s.lock.Lock()
 	if b.Timestamp-s.head.Timestamp >= s.timestamp {
 		h := s.head
 		s.head = s.head.Next
-		h.Done()
-		s.lock.Broadcast()
+		for ele := s.play.Front(); ele != nil; ele = ele.Next() {
+			conn := ele.Value.(*Conn)
+			select {
+			case conn.playChan <- h:
+			default:
+			}
+		}
 	}
 	s.tail.Next = b
-	s.lock.L.Unlock()
+	s.lock.Unlock()
+}
+
+func (s *Stream) AddPlayConn(c *Conn) {
+	s.lock.Lock()
+	for ele := s.play.Front(); ele != nil; ele = ele.Next() {
+		conn := ele.Value.(*Conn)
+		if conn == c {
+			s.lock.Unlock()
+			return
+		}
+	}
+	s.play.PushBack(c)
+	s.lock.Unlock()
+}
+
+func (s *Stream) RemovePlayConn(c *Conn) {
+	s.lock.Lock()
+	for ele := s.play.Front(); ele != nil; ele = ele.Next() {
+		conn := ele.Value.(*Conn)
+		if conn == c {
+			s.play.Remove(ele)
+			close(conn.playChan)
+			s.lock.Unlock()
+			return
+		}
+	}
+	s.lock.Unlock()
 }

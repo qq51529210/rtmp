@@ -9,16 +9,16 @@ import (
 )
 
 type Server struct {
-	Network        string
-	Address        string
-	listener       net.Listener
-	running        bool
-	streamMutex    sync.RWMutex
-	stream         map[string]*AVStream
-	WindowAckSize  uint32
-	BandWidth      uint32
-	BandWidthLimit byte
-	MaxChunkSize   int
+	Network           string
+	Address           string
+	listener          net.Listener
+	running           bool
+	WindowAckSize     uint32
+	BandWidth         uint32
+	BandWidthLimit    byte
+	MaxChunkSize      int
+	publishStreamLock sync.RWMutex
+	publishStream     map[string]*Stream
 }
 
 func (s *Server) Listen() (err error) {
@@ -28,7 +28,7 @@ func (s *Server) Listen() (err error) {
 	}
 	s.WindowAckSize = 1024 * 500
 	s.BandWidth = 1024 * 500
-	s.stream = make(map[string]*AVStream)
+	s.publishStream = make(map[string]*Stream)
 	s.running = true
 	for s.running {
 		conn, err := s.listener.Accept()
@@ -52,32 +52,30 @@ func (s *Server) Listen() (err error) {
 	return
 }
 
-func (s *Server) GetStream(name string) *AVStream {
-	s.streamMutex.RLock()
-	stream := s.stream[name]
-	s.streamMutex.RUnlock()
+func (s *Server) GetPublishStream(name string) *Stream {
+	s.publishStreamLock.RLock()
+	stream := s.publishStream[name]
+	s.publishStreamLock.RUnlock()
 	return stream
 }
 
-func (s *Server) AddStream(name string) (*AVStream, bool) {
-	s.streamMutex.Lock()
-	stream, ok := s.stream[name]
+func (s *Server) AddPublishStream(name string) (*Stream, bool) {
+	s.publishStreamLock.Lock()
+	stream, ok := s.publishStream[name]
 	if !ok {
-		stream = new(AVStream)
-		stream.lock = sync.NewCond(&sync.Mutex{})
+		stream = new(Stream)
 		stream.Valid = true
 	}
-	s.streamMutex.Unlock()
+	s.publishStreamLock.Unlock()
 	return stream, ok
 }
 
 func (s *Server) DeleteStream(name string) {
-	s.streamMutex.Lock()
-	stream, ok := s.stream[name]
+	s.publishStreamLock.Lock()
+	stream, ok := s.publishStream[name]
 	if ok {
-		delete(s.stream, name)
+		delete(s.publishStream, name)
 		stream.Valid = false
-		stream.lock.Broadcast()
 	}
-	s.streamMutex.Unlock()
+	s.publishStreamLock.Unlock()
 }

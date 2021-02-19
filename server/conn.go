@@ -24,23 +24,28 @@ func init() {
 
 type Conn struct {
 	rtmp.MessageHandler
-	connectUrl    *url.URL
-	streamID      uint32
-	playStream    *AVStream
-	publishStream *AVStream
-	receiveVideo  bool
-	receiveAudio  bool
-	playPause     bool
-	conn          *bufio.ReadWriter
-	server        *Server
+	connectUrl *url.URL
+	streamID   uint32
+	// playStream    *Stream
+	// publishStream *Stream
+	receiveVideo bool
+	receiveAudio bool
+	playPause    bool
+	conn         *bufio.ReadWriter
+	server       *Server
+	playChan     chan *StreamData
 }
 
-func (c *Conn) play(stream *AVStream) {
+func (c *Conn) play(stream *Stream) {
+	defer stream.RemovePlayConn(c)
 	var err error
 	var chunk rtmp.ChunkHeader
 	chunk.MessageStreamID = c.streamID
-	data := stream.GetData(nil)
 	for stream.Valid {
+		data, ok := <-c.playChan
+		if !ok {
+			return
+		}
 		if data.IsVideo {
 			chunk.MessageTypeID = rtmp.VideoMessage
 		} else {
@@ -61,10 +66,7 @@ func (c *Conn) play(stream *AVStream) {
 			log.Error(err)
 			break
 		}
-		data = stream.GetData(data)
-	}
-	if data != nil {
-		data.Done()
+		PutStreamData(data)
 	}
 }
 
@@ -245,7 +247,8 @@ func (c *Conn) handleCommandMessagePublish(msg *rtmp.Message) (err error) {
 			"description": "server only support live",
 		})
 	} else {
-		c.publishStream, ok = c.server.AddStream(c.connectUrl.Path)
+		// c.publishStream, ok = c.server.AddPublishStream(c.connectUrl.Path)
+		_, ok = c.server.AddPublishStream(c.connectUrl.Path)
 		if !ok {
 			// 已经有相同的流
 			msg.InitCommandMessage("onStatus", tid, nil, map[string]string{
@@ -448,7 +451,7 @@ func (c *Conn) handleCommandMessagePlay(msg *rtmp.Message) (err error) {
 			return fmt.Errorf("command message.'play'.'reset' invalid data type <%s>", reflect.TypeOf(amf).Kind().String())
 		}
 	}
-	stream := c.server.GetStream(c.connectUrl.Path)
+	stream := c.server.GetPublishStream(c.connectUrl.Path)
 	if stream == nil {
 		msg.InitCommandMessage("onStatus", 0, nil, map[string]string{
 			"level": "error",
@@ -498,6 +501,8 @@ func (c *Conn) handleCommandMessagePlay(msg *rtmp.Message) (err error) {
 	if err != nil {
 		return
 	}
+	c.playChan = make(chan *StreamData, 1)
+	stream.AddPlayConn(c)
 	go c.play(stream)
 	return
 }
