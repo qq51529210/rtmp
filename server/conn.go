@@ -27,13 +27,13 @@ type Conn struct {
 	connectUrl *url.URL
 	streamID   uint32
 	// playStream    *Stream
-	// publishStream *Stream
-	receiveVideo bool
-	receiveAudio bool
-	playPause    bool
-	conn         *bufio.ReadWriter
-	server       *Server
-	playChan     chan *StreamData
+	publishStream *Stream
+	receiveVideo  bool
+	receiveAudio  bool
+	playPause     bool
+	conn          *bufio.ReadWriter
+	server        *Server
+	playChan      chan *StreamData
 }
 
 func (c *Conn) play(stream *Stream) {
@@ -247,8 +247,7 @@ func (c *Conn) handleCommandMessagePublish(msg *rtmp.Message) (err error) {
 			"description": "server only support live",
 		})
 	} else {
-		// c.publishStream, ok = c.server.AddPublishStream(c.connectUrl.Path)
-		_, ok = c.server.AddPublishStream(c.connectUrl.Path)
+		c.publishStream, ok = c.server.AddPublishStream(c.connectUrl.Path)
 		if !ok {
 			// 已经有相同的流
 			msg.InitCommandMessage("onStatus", tid, nil, map[string]string{
