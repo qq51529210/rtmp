@@ -143,21 +143,18 @@ func readAMFObject(r io.Reader) (map[string]interface{}, error) {
 		length = int(binary.BigEndian.Uint16(b[:]))
 		str.WriteByte(b[2])
 		length--
-		for {
+		for length > 0 {
+			if length > len(buff) {
+				m = len(buff)
+			} else {
+				m = length
+			}
 			n, err = r.Read(buff[:m])
 			if err != nil {
 				return nil, err
 			}
 			str.Write(buff[:n])
 			length -= n
-			if length <= 0 {
-				break
-			}
-			if length > len(buff) {
-				m = len(buff)
-			} else {
-				m = length
-			}
 		}
 		k = str.String()
 		str.Reset()
@@ -225,6 +222,8 @@ func WriteAMF(w io.Writer, amf interface{}) error {
 		return writeAMFString(w, v)
 	case map[string]interface{}:
 		return writeAMFObject(w, v)
+	case bool:
+		return writeAMFBoolean(w, v)
 	case nil:
 		return writeAMFNil(w)
 	}
@@ -247,7 +246,7 @@ func writeAMFString(w io.Writer, s string) error {
 	buff[0] = amfString
 	binary.BigEndian.PutUint16(buff[1:], uint16(len(s)))
 	n := copy(buff[3:], s)
-	_, err := w.Write(buff[:n])
+	_, err := w.Write(buff[:n+3])
 	if err != nil {
 		return err
 	}
@@ -268,7 +267,7 @@ func writeAMFLongString(w io.Writer, s string) error {
 	buff[0] = amfLongString
 	binary.BigEndian.PutUint32(buff[1:], uint32(len(s)))
 	n := copy(buff[5:], s)
-	_, err := w.Write(buff[:n])
+	_, err := w.Write(buff[:n+5])
 	if err != nil {
 		return err
 	}
@@ -295,17 +294,36 @@ func writeAMFBoolean(w io.Writer, boolean bool) error {
 }
 
 func writeAMFObject(w io.Writer, obj map[string]interface{}) (err error) {
+	var b [3]byte
+	b[0] = amfObject
+	_, err = w.Write(b[:1])
+	if err != nil {
+		return
+	}
+	var buff [amfStrBufferLen]byte
 	for k, v := range obj {
-		err = writeAMFString(w, k)
+		binary.BigEndian.PutUint16(buff[:], uint16(len(k)))
+		n := copy(buff[2:], k)
+		_, err = w.Write(buff[:n+2])
 		if err != nil {
-			return
+			return err
+		}
+		k = k[n:]
+		for len(k) > 0 {
+			n = copy(buff[:], k)
+			_, err := w.Write(buff[:n])
+			if err != nil {
+				return err
+			}
+			k = k[n:]
 		}
 		err = WriteAMF(w, v)
 		if err != nil {
 			return
 		}
 	}
-	var b [3]byte
+	b[0] = 0
+	b[1] = 0
 	b[2] = amfObjectEnd
 	_, err = w.Write(b[:])
 	return

@@ -15,30 +15,28 @@ import (
 )
 
 const (
-	rtmpProtoVersion            = 3
-	handshakeBufferLen          = 1537
-	handshakeRandomLen          = handshakeBufferLen - 9
-	handshakeKeyLen             = 128
-	handshakeDigestLen          = 32
-	handshakeProtocolVersion    = 0
-	handshakeData               = handshakeProtocolVersion + 1
-	handshakeTime1              = handshakeData
-	handshakeTime2              = handshakeTime1 + 4
-	handshakeVersion            = handshakeTime1 + 4
-	handshakeRandom             = handshakeTime1 + 8
-	handshakeSchema0            = handshakeTime1 + 8
-	handshakeSchema0DigestBlock = handshakeSchema0
-	handshakeSchema0KeyBlock    = handshakeSchema0DigestBlock + 764
-	handshakeSchema0Key         = handshakeSchema0KeyBlock + 764 - 4
-	handshakeSchema1            = handshakeTime1 + 8
-	handshakeSchema1KeyBlock    = handshakeSchema1
-	handshakeSchema1Key         = handshakeSchema1KeyBlock + 764 - 4
-	handshakeSchema1DigestBlock = handshakeSchema1KeyBlock + 764
+	rtmpProtoVersion              = 3
+	handshakeBufferLen            = 1537
+	handshakeRandomLen            = handshakeBufferLen - 9
+	handshakeKeyLen               = 128
+	handshakeDigestLen            = 32
+	handshakeBlockLen             = 764
+	handshakeProtocolVersion      = 0
+	handshakeData                 = handshakeProtocolVersion + 1
+	handshakeTime1                = handshakeData
+	handshakeTime2                = handshakeTime1 + 4
+	handshakeVersion              = handshakeTime1 + 4
+	handshakeRandom               = handshakeTime1 + 8
+	handshakeC2S2Digest           = handshakeBufferLen - handshakeDigestLen
+	handshakeKeyBlockRandomLen    = handshakeBlockLen - handshakeKeyLen - 4
+	handshakeDigestBlockRandomLen = handshakeBlockLen - handshakeDigestLen - 4
+)
 
-	handshakeC2S2Digest = handshakeBufferLen - handshakeDigestLen
-
-	handshakeKeyBlockRandomLen    = 764 - handshakeKeyLen - 4
-	handshakeDigestBlockRandomLen = 764 - handshakeDigestLen - 4
+var (
+	handshakeDigestBlock = []int{handshakeRandom, handshakeRandom + handshakeBlockLen}
+	handshakeKeyBlock    = []int{handshakeDigestBlock[1], handshakeDigestBlock[0]}
+	handshakeDigest      = []int{handshakeDigestBlock[0], handshakeDigestBlock[1]}
+	handshakeKey         = []int{handshakeKeyBlock[0] + handshakeBlockLen - 4, handshakeKeyBlock[1] + handshakeBlockLen - 4}
 )
 
 var (
@@ -72,7 +70,7 @@ var (
 	fpKey30Pool  sync.Pool
 	fmsKeyPool   sync.Pool
 	fmsKey36Pool sync.Pool
-	Version      = 1381256528
+	// Version      = 1381256528
 )
 
 func init() {
@@ -128,7 +126,7 @@ func handshakeCheckDigest(buff []byte, hashPool *sync.Pool) (int, int) {
 	h := hashPool.Get().(hash.Hash)
 	var sum [handshakeDigestLen]byte
 	// schema 0
-	offset := handshakeDigestOffset(buff[handshakeSchema0DigestBlock:], handshakeDigestBlockRandomLen)
+	offset := handshakeDigestOffset(buff[handshakeDigest[0]:], handshakeDigestBlock[0])
 	h.Reset()
 	h.Write(buff[handshakeData:offset])
 	h.Write(buff[offset+handshakeDigestLen:])
@@ -144,10 +142,10 @@ func handshakeCheckDigest(buff []byte, hashPool *sync.Pool) (int, int) {
 	}
 	if find {
 		hashPool.Put(h)
-		return offset, handshakeKeyOffset(buff[handshakeSchema0Key:], handshakeSchema0KeyBlock)
+		return offset, 0
 	}
 	// schema 1
-	offset = handshakeDigestOffset(buff[handshakeSchema1DigestBlock:], handshakeSchema1DigestBlock)
+	offset = handshakeDigestOffset(buff[handshakeDigest[1]:], handshakeDigestBlock[1])
 	h.Reset()
 	h.Write(buff[handshakeData:offset])
 	h.Write(buff[offset+handshakeDigestLen:])
@@ -162,7 +160,7 @@ func handshakeCheckDigest(buff []byte, hashPool *sync.Pool) (int, int) {
 	}
 	if find {
 		hashPool.Put(h)
-		return offset, handshakeKeyOffset(buff[handshakeSchema1Key:], handshakeSchema1KeyBlock)
+		return offset, 1
 	}
 	hashPool.Put(h)
 	return -1, -1
@@ -239,8 +237,8 @@ func HandshakeAccept(conn io.ReadWriter, version uint32) (uint32, error) {
 
 func handshakeComplexAccept(conn io.ReadWriter, buff []byte, version uint32) error {
 	// c1 digest
-	digestOffset, _ := handshakeCheckDigest(buff, &fpKey30Pool)
-	if digestOffset < 0 {
+	digestOffset, schema := handshakeCheckDigest(buff, &fpKey30Pool)
+	if schema < 0 {
 		return errDigestC1
 	}
 	// c1 time
@@ -262,7 +260,7 @@ func handshakeComplexAccept(conn io.ReadWriter, buff []byte, version uint32) err
 	// copy(buff[keyOffset:], c1Key[:])
 	// s1 digest
 	var s1Digest [handshakeDigestLen]byte
-	handshakeGenDigest(buff, s1Digest, &fmsKey36Pool, digestOffset)
+	handshakeGenDigest(buff, s1Digest, &fmsKey36Pool, handshakeDigestBlock[schema])
 	// write s0 s1
 	_, err := conn.Write(buff)
 	if err != nil {
@@ -385,15 +383,20 @@ func handshakeComplexDial(conn io.ReadWriter, version uint32) (uint32, error) {
 	mathRand.Read(buff[handshakeRandom:])
 	// c1 digest
 	var c1Digest [handshakeDigestLen]byte
-	handshakeGenDigest(buff[:], c1Digest, &fpKey30Pool, handshakeSchema0DigestBlock)
+	handshakeGenDigest(buff[:], c1Digest, &fpKey30Pool, handshakeDigestBlock[0])
+	// write c0 c1
+	_, err := conn.Write(buff[:])
+	if err != nil {
+		return 0, errDigestC1
+	}
 	// read s0 s1
-	_, err := io.ReadFull(conn, buff[:])
+	_, err = io.ReadFull(conn, buff[:])
 	if err != nil {
 		return 0, err
 	}
 	// s1 digest
-	digestOffset, _ := handshakeCheckDigest(buff[:], &fmsKey36Pool)
-	if digestOffset < 0 {
+	digestOffset, schema := handshakeCheckDigest(buff[:], &fmsKey36Pool)
+	if schema < 0 {
 		return 0, errDigestS1
 	}
 	// s1 time

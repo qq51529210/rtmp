@@ -6,10 +6,10 @@ import (
 	"sync"
 
 	"github.com/qq51529210/log"
+	"github.com/qq51529210/rtmp"
 )
 
 type Server struct {
-	Network           string
 	Address           string
 	listener          net.Listener
 	running           bool
@@ -17,17 +17,19 @@ type Server struct {
 	BandWidth         uint32
 	BandWidthLimit    byte
 	MaxChunkSize      int
+	Version           uint32
 	publishStreamLock sync.RWMutex
 	publishStream     map[string]*Stream
 }
 
 func (s *Server) Listen() (err error) {
-	s.listener, err = net.Listen(s.Network, s.Address)
+	s.listener, err = net.Listen("tcp", s.Address)
 	if err != nil {
 		return
 	}
 	s.WindowAckSize = 1024 * 500
 	s.BandWidth = 1024 * 500
+	s.BandWidthLimit = 2
 	s.publishStream = make(map[string]*Stream)
 	s.running = true
 	for s.running {
@@ -40,12 +42,21 @@ func (s *Server) Listen() (err error) {
 			c := new(Conn)
 			c.server = s
 			c.conn = bufio.NewReadWriter(bufio.NewReader(conn), bufio.NewWriter(conn))
+			defer func() {
+				if c.publishStream != nil {
+					s.DeleteStream(c.connectUrl.Path)
+				}
+				conn.Close()
+			}()
+			_, err = rtmp.HandshakeAccept(conn, s.Version)
+			if err != nil {
+				log.Error(err)
+				return
+			}
 			err := c.MessageHandler.Read(c.conn, c.handleMessage)
 			if err != nil {
 				log.Error(err)
-			}
-			if c.publishStream != nil {
-				s.DeleteStream(c.connectUrl.Path)
+				return
 			}
 		}(conn)
 	}

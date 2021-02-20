@@ -11,14 +11,14 @@ const (
 )
 
 type ChunkHeader struct {
-	FMT               uint8
-	CSID              uint32   // chunk stream id
-	MessageTimestamp  uint32   // 3字节，在fmt1和fmt2中表示delta
-	MessageLength     uint32   // 3字节
-	MessageTypeID     uint8    // 1字节
-	MessageStreamID   uint32   // 4字节
-	ExtendedTimestamp uint32   // MessageTimestamp=0xffffff才会启用
-	buff              [11]byte // basic3+message11+extended_timestamp4
+	FMT              uint8
+	CSID             uint32 // chunk stream id
+	MessageTimestamp uint32 // 3字节，在fmt1和fmt2中表示delta
+	MessageLength    uint32 // 3字节
+	MessageTypeID    uint8  // 1字节
+	MessageStreamID  uint32 // 4字节
+	// ExtendedTimestamp uint32   // MessageTimestamp=0xffffff才会启用
+	buff [11]byte // basic3+message11+extended_timestamp4
 }
 
 // 从r中读取chunk header
@@ -39,25 +39,31 @@ func (c *ChunkHeader) Read(r io.Reader) (err error) {
 		if err != nil {
 			return
 		}
-		c.ExtendedTimestamp = binary.BigEndian.Uint32(c.buff[:])
+		c.MessageTimestamp = binary.BigEndian.Uint32(c.buff[:])
+		// c.ExtendedTimestamp = binary.BigEndian.Uint32(c.buff[:])
 	}
 	return
 }
 
 // 解析chunk basic header
 func (c *ChunkHeader) readBasicHeader(r io.Reader) (err error) {
-	_, err = io.ReadFull(r, c.buff[:2])
+	_, err = io.ReadFull(r, c.buff[:1])
 	if err != nil {
 		return
 	}
+	c.FMT = c.buff[0] >> 6
 	c.CSID = uint32(c.buff[0] & 0b00111111)
 	switch c.CSID {
 	case 0:
 		// 2字节，[fmt+0][csid+64]
+		_, err = io.ReadFull(r, c.buff[1:2])
+		if err != nil {
+			return
+		}
 		c.CSID = uint32(c.buff[1]) + 64
 	case 1:
 		// 3字节，[fmt+1][csid+64][csid*256]
-		_, err = io.ReadFull(r, c.buff[2:3])
+		_, err = io.ReadFull(r, c.buff[1:3])
 		if err != nil {
 			return
 		}
@@ -71,7 +77,7 @@ func (c *ChunkHeader) readBasicHeader(r io.Reader) (err error) {
 // 解析chunk message header
 func (c *ChunkHeader) readMessageHeader(r io.Reader) (err error) {
 	// message header
-	switch c.buff[0] >> 6 {
+	switch c.FMT {
 	case 0:
 		// 11字节
 		_, err = io.ReadFull(r, c.buff[:])
@@ -111,15 +117,25 @@ func (c *ChunkHeader) Write(w io.Writer) (err error) {
 	if err != nil {
 		return
 	}
-	// message header
-	err = c.writeMessageHeader(w)
-	if err != nil {
-		return
-	}
 	// extended timestamp
-	if c.MessageTimestamp == MaxMessageTimestamp {
-		binary.BigEndian.PutUint32(c.buff[:], c.ExtendedTimestamp)
+	if c.MessageTimestamp >= MaxMessageTimestamp {
+		// c.ExtendedTimestamp = c.MessageTimestamp
+		extendedTimestamp := c.MessageTimestamp
+		c.MessageTimestamp = MaxMessageTimestamp
+		// message header
+		err = c.writeMessageHeader(w)
+		c.MessageTimestamp = extendedTimestamp
+		if err != nil {
+			return
+		}
+		binary.BigEndian.PutUint32(c.buff[:], extendedTimestamp)
 		_, err = w.Write(c.buff[:4])
+	} else {
+		// message header
+		err = c.writeMessageHeader(w)
+		if err != nil {
+			return
+		}
 	}
 	return
 }
