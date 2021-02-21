@@ -38,29 +38,39 @@ func (s *Server) Listen() (err error) {
 			log.Error(err)
 			continue
 		}
-		go func(conn net.Conn) {
-			c := new(Conn)
-			c.server = s
-			c.conn = bufio.NewReadWriter(bufio.NewReader(conn), bufio.NewWriter(conn))
-			defer func() {
-				if c.publishStream != nil {
-					s.DeleteStream(c.connectUrl.Path)
-				}
-				conn.Close()
-			}()
-			_, err = rtmp.HandshakeAccept(conn, s.Version)
-			if err != nil {
-				log.Error(err)
-				return
-			}
-			err := c.MessageHandler.Read(c.conn, c.handleMessage)
-			if err != nil {
-				log.Error(err)
-				return
-			}
-		}(conn)
+		go s.ServeConn(conn)
 	}
 	return
+}
+
+func (s *Server) ServeConn(conn net.Conn) {
+	c := new(Conn)
+	c.server = s
+	c.conn = bufio.NewReadWriter(bufio.NewReader(conn), bufio.NewWriter(conn))
+	defer func() {
+		if c.publishStream != nil {
+			s.DeleteStream(c.connectUrl.Path)
+		}
+		conn.Close()
+	}()
+	_, err := rtmp.HandshakeAccept(conn, s.Version)
+	if err != nil {
+		log.Error(err)
+		return
+	}
+	var msg *rtmp.Message
+	for {
+		msg, err = c.MessageReader.Read(c.conn)
+		if err != nil {
+			log.Error(err)
+			return
+		}
+		err = c.handleMessage(msg)
+		if err != nil {
+			log.Error(err)
+			return
+		}
+	}
 }
 
 func (s *Server) GetPublishStream(name string) *Stream {

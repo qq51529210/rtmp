@@ -266,6 +266,7 @@ type MessageReader struct {
 	Ack             uint32      // Acknowledgement消息的值
 	BandWidth       uint32      // Set Bandwith消息的值
 	BandWidthLimit  byte        // Set Bandwith消息的值
+	ack             Message
 }
 
 func (m *MessageReader) Init() {
@@ -273,6 +274,9 @@ func (m *MessageReader) Init() {
 	m.localChunkSize = ChunkSize
 	m.RemoteChunkSize = ChunkSize
 	m.message = make([]*Message, 0)
+	m.ack.InitControlMessage()
+	m.ack.TypeID = ControlMessageAcknowledgement
+	m.ack.length = 4
 }
 
 func (m *MessageReader) getMessage(csid uint32) *Message {
@@ -292,16 +296,13 @@ func (m *MessageReader) Read(conn io.ReadWriter) (*Message, error) {
 	var n int
 	var err error
 	var msg *Message
-	var ack Message
-	ack.InitControlMessage()
-	ack.TypeID = ControlMessageAcknowledgement
-	ack.length = 4
 	for {
 		// 读取chunk header
 		err = m.chunkHeader.Read(conn)
 		if err != nil {
 			return nil, err
 		}
+		// 消息
 		msg = m.getMessage(m.chunkHeader.CSID)
 		if msg.length == uint32(msg.Data.Len()) {
 			msg.Data.Reset()
@@ -346,9 +347,9 @@ func (m *MessageReader) Read(conn io.ReadWriter) (*Message, error) {
 		// 发送ack
 		m.Ack += msg.length
 		if m.AckSize <= m.Ack {
-			ack.Data.Reset()
-			ack.PutBigEndianUint32(m.Ack)
-			err = ack.Write(conn, m.localChunkSize)
+			m.ack.Data.Reset()
+			m.ack.PutBigEndianUint32(m.Ack)
+			err = m.ack.Write(conn, m.localChunkSize)
 			if err != nil {
 				return nil, err
 			}

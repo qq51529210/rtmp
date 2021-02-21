@@ -2,66 +2,80 @@ package rtmp
 
 import (
 	"bytes"
+	"io"
 	"sync"
 	"testing"
 	"time"
 )
 
 type testConn struct {
-	rc *sync.Cond
-	wc *sync.Cond
-	r  *bytes.Buffer
-	w  *bytes.Buffer
+	q chan struct{}
+	w chan []byte
+	r chan []byte
+	b bytes.Buffer
 }
 
 func (c *testConn) Read(b []byte) (int, error) {
-	c.rc.L.Lock()
-	for c.r.Len() <= 0 {
-		c.rc.Wait()
+	if c.b.Len() > 0 {
+		return c.b.Read(b)
 	}
-	c.rc.L.Unlock()
-	return c.r.Read(b)
+	select {
+	case d := <-c.r:
+		c.b.Write(d)
+	case <-c.q:
+		return 0, io.EOF
+	}
+	return c.b.Read(b)
 }
 
 func (c *testConn) Write(b []byte) (int, error) {
-	n, err := c.w.Write(b)
-	c.wc.Broadcast()
-	return n, err
+	d := make([]byte, len(b))
+	copy(d, b)
+	select {
+	case c.w <- d:
+		return len(d), nil
+	case <-c.q:
+		return 0, io.ErrShortWrite
+	}
 }
 
 func TestHandshake(t *testing.T) {
 	wait := new(sync.WaitGroup)
 	wait.Add(2)
-	network1 := sync.NewCond(new(sync.Mutex))
-	network2 := sync.NewCond(new(sync.Mutex))
-	data1 := bytes.NewBuffer(nil)
-	data2 := bytes.NewBuffer(nil)
-	client := &testConn{
-		rc: network1,
-		wc: network2,
-		r:  data1,
-		w:  data2,
-	}
-	server := &testConn{
-		rc: network2,
-		wc: network1,
-		r:  data2,
-		w:  data1,
-	}
+	quit := make(chan struct{})
+	once := new(sync.Once)
+	c1 := make(chan []byte, 1)
+	c2 := make(chan []byte, 1)
+	client := new(testConn)
+	client.q = quit
+	client.w = c1
+	client.r = c2
+	server := new(testConn)
+	server.q = quit
+	server.w = client.r
+	server.r = client.w
+	var err1, err2 error
 	go func() {
 		defer wait.Done()
-		_, err := HandshakeDial(client, 3)
-		if err != nil {
-			t.Log(err)
+		_, err1 = HandshakeDial(client, 3)
+		if err1 != nil {
+			once.Do(func() { close(quit) })
 		}
 	}()
 	go func() {
 		defer wait.Done()
-		time.Sleep(time.Second)
-		_, err := HandshakeAccept(server, 0)
-		if err != nil {
-			t.Log(err)
+		time.Sleep(time.Millisecond * 10)
+		_, err2 = HandshakeAccept(server, 0)
+		if err2 != nil {
+			once.Do(func() { close(quit) })
 		}
 	}()
 	wait.Wait()
+	once.Do(func() { close(quit) })
+	if err1 != nil {
+		t.Fatal(err1)
+	}
+	if err2 != nil {
+		t.Fatal(err2)
+	}
 }

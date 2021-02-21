@@ -23,7 +23,7 @@ func init() {
 }
 
 type Conn struct {
-	rtmp.MessageHandler
+	rtmp.MessageReader
 	connectUrl *url.URL
 	streamID   uint32
 	// playStream    *Stream
@@ -54,9 +54,8 @@ func (c *Conn) play(stream *Stream) {
 		chunk.MessageTimestamp = data.Timestamp
 		if chunk.MessageTimestamp >= rtmp.MaxMessageTimestamp {
 			chunk.MessageTimestamp = rtmp.MaxMessageTimestamp
-			chunk.ExtendedTimestamp = data.Timestamp
 		}
-		err = rtmp.WriteMessage(c.conn, c.MessageHandler.RemoteChunkSize, &chunk, data.Data)
+		err = rtmp.WriteMessage(c.conn, c.MessageReader.RemoteChunkSize, &chunk, data.Data)
 		if err != nil {
 			log.Error(err)
 			break
@@ -456,7 +455,7 @@ func (c *Conn) handleCommandMessagePlay(msg *rtmp.Message) (err error) {
 			"level": "error",
 			"Code":  "NetStream.Play.StreamNotFound",
 		})
-		err = msg.Write(c.conn, c.MessageHandler.RemoteChunkSize)
+		err = msg.Write(c.conn, c.MessageReader.RemoteChunkSize)
 		if err != nil {
 			return
 		}
@@ -464,17 +463,17 @@ func (c *Conn) handleCommandMessagePlay(msg *rtmp.Message) (err error) {
 	}
 	//
 	msg.InitControlMessageSetChunkSize(uint32(c.RemoteChunkSize))
-	err = msg.Write(c.conn, c.MessageHandler.RemoteChunkSize)
+	err = msg.Write(c.conn, c.MessageReader.RemoteChunkSize)
 	if err != nil {
 		return
 	}
 	msg.InitUserControlMessageStreamIsRecorded(c.streamID)
-	err = msg.Write(c.conn, c.MessageHandler.RemoteChunkSize)
+	err = msg.Write(c.conn, c.MessageReader.RemoteChunkSize)
 	if err != nil {
 		return
 	}
 	msg.InitUserControlMessageStreamBegin(c.streamID)
-	err = msg.Write(c.conn, c.MessageHandler.RemoteChunkSize)
+	err = msg.Write(c.conn, c.MessageReader.RemoteChunkSize)
 	if err != nil {
 		return
 	}
@@ -483,7 +482,7 @@ func (c *Conn) handleCommandMessagePlay(msg *rtmp.Message) (err error) {
 			"level": "status",
 			"Code":  "NetStream.Play.Reset",
 		})
-		err = msg.Write(c.conn, c.MessageHandler.RemoteChunkSize)
+		err = msg.Write(c.conn, c.MessageReader.RemoteChunkSize)
 		if err != nil {
 			return
 		}
@@ -492,7 +491,7 @@ func (c *Conn) handleCommandMessagePlay(msg *rtmp.Message) (err error) {
 		"level": "status",
 		"Code":  "NetStream.Play.Start",
 	})
-	err = msg.Write(c.conn, c.MessageHandler.RemoteChunkSize)
+	err = msg.Write(c.conn, c.MessageReader.RemoteChunkSize)
 	if err != nil {
 		return
 	}
@@ -517,7 +516,7 @@ func (c *Conn) handleCommandMessageCreateStream(msg *rtmp.Message) (err error) {
 		return fmt.Errorf("command message.'createStream'.'transactionID' invalid data type <%s>", reflect.TypeOf(amf).Kind().String())
 	}
 	msg.InitCommandMessage("_result", transactionID, nil, c.streamID)
-	err = msg.Write(c.conn, c.MessageHandler.RemoteChunkSize)
+	err = msg.Write(c.conn, c.MessageReader.RemoteChunkSize)
 	if err != nil {
 		messagePool.Put(err)
 		return
@@ -563,17 +562,17 @@ func (c *Conn) handleCommandMessageConnect(msg *rtmp.Message) (err error) {
 	// optional user arguments
 	//
 	msg.InitControlMessageWindowAcknowledgementSize(c.server.WindowAckSize)
-	err = msg.Write(c.conn, c.MessageHandler.RemoteChunkSize)
+	err = msg.Write(c.conn, c.MessageReader.RemoteChunkSize)
 	if err != nil {
 		return
 	}
 	msg.InitControlMessageSetBandWidth(c.server.BandWidth, c.server.BandWidthLimit)
-	err = msg.Write(c.conn, c.MessageHandler.RemoteChunkSize)
+	err = msg.Write(c.conn, c.MessageReader.RemoteChunkSize)
 	if err != nil {
 		return
 	}
 	msg.InitUserControlMessageStreamBegin(c.streamID)
-	err = msg.Write(c.conn, c.MessageHandler.RemoteChunkSize)
+	err = msg.Write(c.conn, c.MessageReader.RemoteChunkSize)
 	if err != nil {
 		return
 	}
@@ -585,7 +584,7 @@ func (c *Conn) handleCommandMessageConnect(msg *rtmp.Message) (err error) {
 		"code":           "NetConnection.Connect.Success",
 		"objectEncoding": 0,
 	})
-	err = msg.Write(c.conn, c.MessageHandler.RemoteChunkSize)
+	err = msg.Write(c.conn, c.MessageReader.RemoteChunkSize)
 	if err != nil {
 		return
 	}
