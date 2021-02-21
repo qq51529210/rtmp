@@ -15,28 +15,7 @@ import (
 )
 
 const (
-	rtmpProtoVersion              = 3
-	handshakeBufferLen            = 1537
-	handshakeRandomLen            = handshakeBufferLen - 9
-	handshakeKeyLen               = 128
-	handshakeDigestLen            = 32
-	handshakeBlockLen             = 764
-	handshakeProtocolVersion      = 0
-	handshakeData                 = handshakeProtocolVersion + 1
-	handshakeTime1                = handshakeData
-	handshakeTime2                = handshakeTime1 + 4
-	handshakeVersion              = handshakeTime1 + 4
-	handshakeRandom               = handshakeTime1 + 8
-	handshakeC2S2Digest           = handshakeBufferLen - handshakeDigestLen
-	handshakeKeyBlockRandomLen    = handshakeBlockLen - handshakeKeyLen - 4
-	handshakeDigestBlockRandomLen = handshakeBlockLen - handshakeDigestLen - 4
-)
-
-var (
-	handshakeDigestBlock = []int{handshakeRandom, handshakeRandom + handshakeBlockLen}
-	handshakeKeyBlock    = []int{handshakeDigestBlock[1], handshakeDigestBlock[0]}
-	handshakeDigest      = []int{handshakeDigestBlock[0], handshakeDigestBlock[1]}
-	handshakeKey         = []int{handshakeKeyBlock[0] + handshakeBlockLen - 4, handshakeKeyBlock[1] + handshakeBlockLen - 4}
+	rtmpProtoVersion = 3
 )
 
 var (
@@ -88,49 +67,54 @@ func init() {
 	}
 }
 
-// 求哈希
-func genHash(key, data []byte, digest [handshakeDigestLen]byte) {
-	h := hmac.New(sha256.New, key)
-	h.Write(data)
-	h.Sum(digest[:0])
+type (
+	handshakeDigest [32]byte
+	handshakeKey    [128]byte
+	handshakeRandom [1528]byte
+	handshakeBuffer [1537]byte
+)
+
+func handshakeSchema0DigestOffset(buff []byte) int {
+	// 764-32-4=728
+	return 13 + ((int(buff[9]) + int(buff[10]) + int(buff[11]) + int(buff[12])) % 728)
 }
 
-// 4个字节相加，然后取余数，offset表示key block的偏移
-func handshakeKeyOffset(buff []byte, offset int) int {
-	return offset + (int(buff[0])+int(buff[1])+int(buff[2])+int(buff[3]))%handshakeKeyBlockRandomLen
+func handshakeSchema1DigestOffset(buff []byte) int {
+	// 1537-764=773
+	// 764-32-4=728
+	return 777 + ((int(buff[773]) + int(buff[774]) + int(buff[775]) + int(buff[776])) % 728)
 }
 
-// 4个字节相加，然后取余数，length表示digest block的偏移
-func handshakeDigestOffset(buff []byte, offset int) int {
-	return offset + 4 + (int(buff[0])+int(buff[1])+int(buff[2])+int(buff[3]))%handshakeDigestBlockRandomLen
-}
-
-// 生成buff的digest。
-// buff是数据。digest用于接收生成的哈希值。hashPool是hash.Hash的缓存池。offset是digest block的偏移。
-func handshakeGenDigest(buff []byte, digest [handshakeDigestLen]byte, hashPool *sync.Pool, offset int) {
-	// 计算出数据块内的偏移+4+数据块整体的偏移 = digest在buff中的偏移
-	offset = handshakeDigestOffset(buff[offset:], offset)
-	// 哈希
+func handshakeGenSchema0Digest(buff, digest []byte, hashPool *sync.Pool) {
+	offset := handshakeSchema0DigestOffset(buff)
 	h := hashPool.Get().(hash.Hash)
 	h.Reset()
-	h.Write(buff[handshakeData:offset])
-	h.Write(buff[offset+handshakeDigestLen:])
+	h.Write(buff[1:offset])
+	h.Write(buff[offset+32:])
 	h.Sum(digest[:0])
 	hashPool.Put(h)
-	// 拷贝到buff中
 	copy(buff[offset:], digest[:])
 }
 
-// 检查数据，返回-1表示检查不通过，否则返回digest数据块在buff中的偏移
-func handshakeCheckDigest(buff []byte, digest [handshakeDigestLen]byte, hashPool *sync.Pool) int {
+func handshakeGenSchema1Digest(buff, digest []byte, hashPool *sync.Pool) {
+	offset := handshakeSchema1DigestOffset(buff)
 	h := hashPool.Get().(hash.Hash)
-	var sum [handshakeDigestLen]byte
-	schema := 0
-	// schema 0
-	offset := handshakeDigestOffset(buff[handshakeDigest[schema]:], handshakeDigestBlock[schema])
 	h.Reset()
-	h.Write(buff[handshakeData:offset])
-	h.Write(buff[offset+handshakeDigestLen:])
+	h.Write(buff[1:offset])
+	h.Write(buff[offset+32:])
+	h.Sum(digest[:0])
+	hashPool.Put(h)
+	copy(buff[offset:], digest[:])
+}
+
+func handshakeCheckDigest(buff, digest []byte, hashPool *sync.Pool) (schema int) {
+	h := hashPool.Get().(hash.Hash)
+	var sum handshakeDigest
+	// schema 0
+	offset := handshakeSchema0DigestOffset(buff)
+	h.Reset()
+	h.Write(buff[1:offset])
+	h.Write(buff[offset+32:])
 	h.Sum(sum[:0])
 	// 检查
 	p := buff[offset:]
@@ -144,14 +128,14 @@ func handshakeCheckDigest(buff []byte, digest [handshakeDigestLen]byte, hashPool
 	if find {
 		hashPool.Put(h)
 		copy(digest[:], buff[offset:])
-		return schema
+		return
 	}
 	schema = 1
 	// schema 1
-	offset = handshakeDigestOffset(buff[handshakeDigest[schema]:], handshakeDigestBlock[schema])
+	offset = handshakeSchema1DigestOffset(buff)
 	h.Reset()
-	h.Write(buff[handshakeData:offset])
-	h.Write(buff[offset+handshakeDigestLen:])
+	h.Write(buff[1:offset])
+	h.Write(buff[offset+32:])
 	h.Sum(sum[:0])
 	p = buff[offset:]
 	find = true
@@ -164,77 +148,94 @@ func handshakeCheckDigest(buff []byte, digest [handshakeDigestLen]byte, hashPool
 	if find {
 		hashPool.Put(h)
 		copy(digest[:], buff[offset:])
-		return schema
+		return
 	}
 	hashPool.Put(h)
-	return -1
+	schema = -1
+	return
+}
+
+func handshakeGenDigest2(buff, data []byte, hashPool *sync.Pool) {
+	var digest handshakeDigest
+	h := hashPool.Get().(hash.Hash)
+	h.Reset()
+	h.Write(data[:])
+	h.Sum(digest[:0])
+	hashPool.Put(h)
+	// 1537-32=1505
+	h = hmac.New(sha256.New, digest[:])
+	h.Write(buff[1:1505])
+	h.Sum(digest[:0])
+	copy(buff[1505:], digest[:])
+	return
+}
+
+func handshakeCheckDigest2(buff, data []byte, hashPool *sync.Pool) bool {
+	h := hashPool.Get().(hash.Hash)
+	var digest handshakeDigest
+	h.Reset()
+	h.Write(data[:])
+	h.Sum(digest[:0])
+	hashPool.Put(h)
+	// 1537-32=1505
+	h = hmac.New(sha256.New, digest[:])
+	h.Write(buff[1:1505])
+	h.Sum(digest[:0])
+	return bytes.Compare(digest[:], buff[1505:]) == 0
 }
 
 // conn一般是net.Conn。
 // version是自定义的版本（不是RTMP_PROTO_VERSION哦）。
 // 返回客户端c1消息的自定义版本，或者错误。
 func HandshakeAccept(conn io.ReadWriter, version uint32) (uint32, error) {
-	var buff [handshakeBufferLen]byte
-	// read c0 c1
-	_, err := io.ReadFull(conn, buff[:])
+	var handshakeBuffer handshakeBuffer
+	buff := handshakeBuffer[:]
+	// c0 c1
+	_, err := io.ReadFull(conn, buff)
 	if err != nil {
 		return 0, err
 	}
-	// c0 protocol version
-	if buff[handshakeProtocolVersion] != rtmpProtoVersion {
-		return 0, fmt.Errorf("invalid protocol version <%d>", buff[handshakeProtocolVersion])
+	if buff[0] != rtmpProtoVersion {
+		return 0, fmt.Errorf("invalid protocol version <%d>", buff[0])
 	}
-	// c1 version
-	c1Version := binary.BigEndian.Uint32(buff[handshakeVersion:])
+	c1Version := binary.BigEndian.Uint32(buff[5:])
 	if c1Version != 0 {
 		// complex handshake
-		return c1Version, handshakeComplexAccept(conn, buff[:], version)
+		return c1Version, handshakeComplexAccept(conn, buff, version)
 	}
-	// c1 time
-	c1Time := binary.BigEndian.Uint32(buff[handshakeTime1:])
-	// c1 random
-	var c1Random [handshakeRandomLen]byte
-	copy(c1Random[:], buff[handshakeRandom:])
-	// s1 time
+	c1Time := binary.BigEndian.Uint32(buff[1:])
+	var c1Random handshakeRandom
+	copy(c1Random[:], buff[9:])
+	// s1
 	s1Time := uint32(time.Now().Unix())
-	binary.BigEndian.PutUint32(buff[handshakeTime1:], s1Time)
-	// s1 version
-	binary.BigEndian.PutUint32(buff[handshakeVersion:], version)
-	// s1 random
-	mathRand.Read(buff[handshakeRandom:])
-	var s1Random [handshakeRandomLen]byte
-	copy(s1Random[:], buff[handshakeRandom:])
-	// write s0 s1
-	_, err = conn.Write(buff[:])
+	binary.BigEndian.PutUint32(buff[1:], s1Time)
+	binary.BigEndian.PutUint32(buff[5:], version)
+	mathRand.Read(buff[9:])
+	var s1Random handshakeRandom
+	copy(s1Random[:], buff[9:])
+	_, err = conn.Write(buff)
 	if err != nil {
 		return 0, err
 	}
-	// s2 time1 = c1 time1
-	binary.BigEndian.PutUint32(buff[handshakeTime1:], c1Time)
-	// s2 time2
-	binary.BigEndian.PutUint32(buff[handshakeTime2:], uint32(time.Now().Unix()))
-	// s2 random = c1 random
-	copy(buff[handshakeRandom:], c1Random[:])
-	// write s2
-	_, err = conn.Write(buff[handshakeData:])
+	// s2
+	binary.BigEndian.PutUint32(buff[1:], c1Time)
+	binary.BigEndian.PutUint32(buff[5:], uint32(time.Now().Unix()))
+	copy(buff[9:], c1Random[:])
+	_, err = conn.Write(buff[1:])
 	if err != nil {
 		return 0, err
 	}
-	// read c2
-	_, err = io.ReadFull(conn, buff[handshakeData:])
+	// c2
+	_, err = io.ReadFull(conn, buff[1:])
 	if err != nil {
 		return 0, err
 	}
-	// c2 time1 = s1 time
-	c2Time := binary.BigEndian.Uint32(buff[handshakeTime1:])
+	c2Time := binary.BigEndian.Uint32(buff[1:])
 	if c2Time != s1Time {
 		return 0, fmt.Errorf("c2 time <%d> no equal s1 time <%d>", c2Time, s1Time)
 	}
-	// c2 time2
-	// binary.BigEndian.Uint32(buff[handshakeTime2:])
-	// c2 random = s1 random
-	c2Random := buff[handshakeRandom:]
-	for i := 0; i < handshakeRandomLen; i++ {
+	c2Random := buff[9:]
+	for i := 0; i < len(c2Random); i++ {
 		if c2Random[i] != s1Random[i] {
 			return 0, fmt.Errorf("c2 random <%d> no equal s1 random <%d> at <%d>", c2Random[i], s1Random[i], i)
 		}
@@ -243,204 +244,149 @@ func HandshakeAccept(conn io.ReadWriter, version uint32) (uint32, error) {
 }
 
 func handshakeComplexAccept(conn io.ReadWriter, buff []byte, version uint32) error {
-	// c1 time
-	c1Time := binary.BigEndian.Uint32(buff[handshakeTime1:])
-	// c1 digest
-	var c1Digest [handshakeDigestLen]byte
-	schema := handshakeCheckDigest(buff, c1Digest, &fpKey30Pool)
+	c1Time := binary.BigEndian.Uint32(buff[1:])
+	var c1Digest handshakeDigest
+	schema := handshakeCheckDigest(buff, c1Digest[:], &fpKey30Pool)
 	if schema < 0 {
 		return errDigestC1
 	}
-	// s1 time
+	// s0s1
 	s1Time := uint32(time.Now().Unix())
-	binary.BigEndian.PutUint32(buff[handshakeTime1:], s1Time)
-	// s1 version
-	binary.BigEndian.PutUint32(buff[handshakeVersion:], version)
-	// s1 random
-	mathRand.Read(buff[handshakeRandom:])
-	// s1 digest
-	var s1Digest [handshakeDigestLen]byte
-	handshakeGenDigest(buff, s1Digest, &fmsKey36Pool, handshakeDigestBlock[schema])
-	// write s0 s1
+	binary.BigEndian.PutUint32(buff[1:], s1Time)
+	binary.BigEndian.PutUint32(buff[5:], version)
+	mathRand.Read(buff[9:])
+	var s1Digest handshakeDigest
+	if schema == 0 {
+		handshakeGenSchema0Digest(buff, s1Digest[:], &fmsKey36Pool)
+	} else {
+		handshakeGenSchema1Digest(buff, s1Digest[:], &fmsKey36Pool)
+	}
 	_, err := conn.Write(buff)
 	if err != nil {
 		return err
 	}
-	var digest [handshakeDigestLen]byte
-	// s2 time1 = c1 time1
-	binary.BigEndian.PutUint32(buff[handshakeTime1:], c1Time)
-	// s2 time2
-	binary.BigEndian.PutUint32(buff[handshakeTime2:], uint32(time.Now().Unix()))
-	// s2 random
-	mathRand.Read(buff[handshakeRandom:handshakeC2S2Digest])
-	// s2 digest
-	genHash(c1Digest[:], buff[handshakeData:handshakeC2S2Digest], digest)
-	copy(buff[handshakeC2S2Digest:], digest[:])
+	// s2
+	binary.BigEndian.PutUint32(buff[1:], c1Time)
+	binary.BigEndian.PutUint32(buff[5:], uint32(time.Now().Unix()))
+	mathRand.Read(buff[9:])
+	handshakeGenDigest2(buff, c1Digest[:], &fmsKeyPool)
+	_, err = conn.Write(buff[1:])
 	if err != nil {
 		return err
 	}
-	// write s2
-	_, err = conn.Write(buff[handshakeData:])
-	// read c2
-	_, err = io.ReadFull(conn, buff[handshakeData:])
+	// c2
+	_, err = io.ReadFull(conn, buff[1:])
 	if err != nil {
 		return err
 	}
-	// c2 digest
-	c2Digest := buff[handshakeC2S2Digest:]
-	genHash(s1Digest[:], buff[handshakeData:handshakeC2S2Digest], digest)
-	if bytes.Compare(c2Digest, digest[:]) != 0 {
+	if !handshakeCheckDigest2(buff, s1Digest[:], &fpKeyPool) {
 		return errDigestC2
 	}
-	// c2 time1 = s1 time
-	c2Time := binary.BigEndian.Uint32(buff[handshakeTime1:])
-	// c2 time1
+	c2Time := binary.BigEndian.Uint32(buff[1:])
 	if c2Time != s1Time {
 		return fmt.Errorf("c2 time <%d> no equal s1 time <%d>", c2Time, s1Time)
 	}
-	// c2 time2
-	// c2Time2 := binary.BigEndian.Uint32(buff[handshakeTime2:])
 	return nil
 }
 
-// conn一般是net.COnn。
+// conn一般是net.Conn。
 // version是自定义的版本，0表示简单握手，非0则是复杂握手。
 // 返回服务端s1消息的自定义版本，或者错误。
 func HandshakeDial(conn io.ReadWriter, version uint32) (uint32, error) {
+	var handshakeBuffer handshakeBuffer
+	buff := handshakeBuffer[:]
+	// c0c1
+	buff[0] = rtmpProtoVersion
+	c1Time := uint32(time.Now().Unix())
+	binary.BigEndian.PutUint32(buff[1:], c1Time)
+	binary.BigEndian.PutUint32(buff[5:], version)
+	mathRand.Read(buff[9:])
+	var c1Random handshakeRandom
+	copy(c1Random[:], buff[9:])
 	if version != 0 {
 		// complex
-		return handshakeComplexDial(conn, version)
+		return handshakeComplexDial(conn, buff, c1Time, version)
 	}
-	var buff [handshakeBufferLen]byte
-	// c0 protocal version
-	buff[handshakeProtocolVersion] = rtmpProtoVersion
-	// c1 time
-	c1Time := uint32(time.Now().Unix())
-	binary.BigEndian.PutUint32(buff[handshakeTime1:], c1Time)
-	// c1 version
-	binary.BigEndian.PutUint32(buff[handshakeVersion:], version)
-	// c1 random
-	mathRand.Read(buff[handshakeRandom:])
-	var c1Random [handshakeRandomLen]byte
-	copy(c1Random[:], buff[handshakeRandom:])
-	// write c0 c1
 	_, err := conn.Write(buff[:])
 	if err != nil {
 		return 0, err
 	}
-	// read s0 s1
+	// s0s1
 	_, err = io.ReadFull(conn, buff[:])
 	if err != nil {
 		return 0, err
 	}
-	// s0 protocol version
-	if buff[handshakeProtocolVersion] != rtmpProtoVersion {
-		return 0, fmt.Errorf("invalid protocol version <%d>", buff[handshakeProtocolVersion])
+	if buff[0] != rtmpProtoVersion {
+		return 0, fmt.Errorf("invalid protocol version <%d>", buff[0])
 	}
-	// s1 time，在c2 time1中发送
-	// s1Time := binary.BigEndian.Uint32(buff[handshakeTime1:])
-	// s1 version
-	s1Version := binary.BigEndian.Uint32(buff[handshakeVersion:])
-	// c2 time1
-	// binary.BigEndian.PutUint32(buff[handshakeTime2:], s1Time)
-	// c2 time2
-	binary.BigEndian.PutUint32(buff[handshakeTime2:], uint32(time.Now().Unix()))
-	// c2 random，就是s1 random
-	// write c2
-	_, err = conn.Write(buff[handshakeData:])
+	s1Version := binary.BigEndian.Uint32(buff[5:])
+	// c2
+	binary.BigEndian.PutUint32(buff[5:], uint32(time.Now().Unix()))
+	_, err = conn.Write(buff[1:])
 	if err != nil {
 		return 0, err
 	}
-	// read s2
-	_, err = io.ReadFull(conn, buff[handshakeData:])
+	// s2
+	_, err = io.ReadFull(conn, buff[1:])
 	if err != nil {
 		return 0, err
 	}
-	// s2 time1
-	s2Time1 := binary.BigEndian.Uint32(buff[handshakeTime1:])
+	s2Time1 := binary.BigEndian.Uint32(buff[1:])
 	if s2Time1 != c1Time {
 		return 0, fmt.Errorf("s2 time <%d> no equal c1 time <%d>", s2Time1, c1Time)
 	}
-	// s2 time2
-	// s2Time2 := binary.BigEndian.Uint32(buff[handshakeTime2:])
-	// s2 random
-	for i := 0; i < len(buff[handshakeRandom:]); i++ {
-		if c1Random[i] != buff[i] {
-			return 0, fmt.Errorf("s2 random <%d> no equal c1 random <%d> at <%d>", buff[i], c1Random[i], i)
+	s2Random := buff[9:]
+	for i := 0; i < len(s2Random); i++ {
+		if c1Random[i] != s2Random[i] {
+			return 0, fmt.Errorf("s2 random <%d> no equal c1 random <%d> at <%d>", s2Random[i], c1Random[i], i)
 		}
 	}
 	return s1Version, nil
 }
 
 // digest - key的模式
-func handshakeComplexDial(conn io.ReadWriter, version uint32) (uint32, error) {
-	var buff [handshakeBufferLen]byte
-	// c0 protocal version
-	buff[handshakeProtocolVersion] = rtmpProtoVersion
-	// c1 time
-	c1Time := uint32(time.Now().Unix())
-	binary.BigEndian.PutUint32(buff[handshakeTime1:], c1Time)
-	// c1 version
-	binary.BigEndian.PutUint32(buff[handshakeVersion:], version)
-	// c1 random
-	mathRand.Read(buff[handshakeRandom:])
-	// c1 digest
-	var c1Digest [handshakeDigestLen]byte
-	handshakeGenDigest(buff[:], c1Digest, &fpKey30Pool, handshakeDigestBlock[0])
-	// write c0 c1
+func handshakeComplexDial(conn io.ReadWriter, buff []byte, c1Time, version uint32) (uint32, error) {
+	var c1Digest handshakeDigest
+	handshakeGenSchema0Digest(buff, c1Digest[:], &fpKey30Pool)
 	_, err := conn.Write(buff[:])
 	if err != nil {
-		return 0, errDigestC1
+		return 0, err
 	}
-	// read s0 s1
+	// s0 s1
 	_, err = io.ReadFull(conn, buff[:])
 	if err != nil {
 		return 0, err
 	}
-	// s1 digest
-	var s1Digest [handshakeDigestLen]byte
-	schema := handshakeCheckDigest(buff[:], s1Digest, &fmsKey36Pool)
+	if buff[0] != rtmpProtoVersion {
+		return 0, fmt.Errorf("invalid protocol version <%d>", buff[0])
+	}
+	var s1Digest handshakeDigest
+	schema := handshakeCheckDigest(buff, s1Digest[:], &fmsKey36Pool)
 	if schema < 0 {
 		return 0, errDigestS1
 	}
-	// s1 time
-	s1Time := binary.BigEndian.Uint32(buff[handshakeTime1:])
-	// s1 version
-	s1Version := binary.BigEndian.Uint32(buff[handshakeVersion:])
-	// c2 tim1，s1 time1
-	binary.BigEndian.PutUint32(buff[handshakeTime1:], s1Time)
-	// c2 time2
-	binary.BigEndian.PutUint32(buff[handshakeTime2:], uint32(time.Now().Unix()))
-	// c2 random
-	mathRand.Read(buff[handshakeRandom:])
-	// c2 digest
-	var digest [handshakeDigestLen]byte
-	genHash(s1Digest[:], buff[handshakeData:handshakeC2S2Digest], digest)
-	copy(buff[handshakeC2S2Digest:], digest[:])
-	// write c2
-	_, err = conn.Write(buff[handshakeData:])
+	s1Time := binary.BigEndian.Uint32(buff[1:])
+	s1Version := binary.BigEndian.Uint32(buff[5:])
+	// c2
+	binary.BigEndian.PutUint32(buff[1:], s1Time)
+	binary.BigEndian.PutUint32(buff[5:], uint32(time.Now().Unix()))
+	mathRand.Read(buff[9:])
+	handshakeGenDigest2(buff, s1Digest[:], &fpKeyPool)
+	_, err = conn.Write(buff[1:])
 	if err != nil {
 		return 0, err
 	}
-	// read s2
-	_, err = io.ReadFull(conn, buff[handshakeData:])
+	// s2
+	_, err = io.ReadFull(conn, buff[1:])
 	if err != nil {
 		return 0, err
 	}
-	// s2 digest
-	s2Digest := buff[handshakeC2S2Digest:]
-	// 以c1 digest为key的hash
-	genHash(c1Digest[:], buff[handshakeData:handshakeC2S2Digest], digest)
-	// 比较
-	if bytes.Compare(digest[:], s2Digest) != 0 {
+	if !handshakeCheckDigest2(buff, c1Digest[:], &fmsKeyPool) {
 		return 0, errDigestS2
 	}
-	// s2 time1
-	s2Time1 := binary.BigEndian.Uint32(buff[handshakeTime1:])
+	s2Time1 := binary.BigEndian.Uint32(buff[1:])
 	if s2Time1 != c1Time {
 		return 0, fmt.Errorf("s2 time <%d> no equal c1 time <%d>", s2Time1, c1Time)
 	}
-	// s2 time2
-	// s2Time := binary.BigEndian.Uint32(buff[handshakeTime1:])
 	return s1Version, nil
 }
