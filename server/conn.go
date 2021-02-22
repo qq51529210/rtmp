@@ -55,7 +55,7 @@ func (c *Conn) play(stream *Stream) {
 		if chunk.MessageTimestamp >= rtmp.MaxMessageTimestamp {
 			chunk.MessageTimestamp = rtmp.MaxMessageTimestamp
 		}
-		err = rtmp.WriteMessage(c.conn, c.MessageReader.RemoteChunkSize, &chunk, data.Data)
+		err = rtmp.WriteMessage(c.conn, &chunk, c.MessageReader.RemoteChunkSize, data.Data)
 		if err != nil {
 			log.Error(err)
 			break
@@ -93,8 +93,9 @@ func (c *Conn) handleMessage(msg *rtmp.Message) error {
 			return c.handleUserControlMessagePingRequest(p)
 		case rtmp.UserControlMessagePingResponse:
 			return c.handleUserControlMessagePingResponse(p)
+		default:
+			log.Printf(log.DebugLevel, 0, "user control message event <%d>", event)
 		}
-		return fmt.Errorf("user control message unsupported event <%d>", event)
 	case rtmp.CommandMessageAMF0, rtmp.CommandMessageAMF3:
 		amf, err := rtmp.ReadAMF(&msg.Data)
 		if err != nil {
@@ -116,28 +117,38 @@ func (c *Conn) handleMessage(msg *rtmp.Message) error {
 				return c.handleCommandMessageDeleteStream(msg)
 			case "closeStream":
 				return c.handleCommandMessageCloseStream(msg)
+			case "releaseStream":
+				return c.handleCommandMessageCloseStream(msg)
 			case "receiveAudio":
 				return c.handleCommandMessageReceiveAudio(msg)
 			case "receiveVideo":
 				return c.handleCommandMessageReceiveVideo(msg)
 			case "publish":
 				return c.handleCommandMessagePublish(msg)
+			case "FCPublish":
+				return c.handleCommandMessageFCPublish(msg)
 			case "seek":
 				return c.handleCommandMessageSeek(msg)
 			case "pause":
 				return c.handleCommandMessagePause(msg)
+			default:
+				log.Printf(log.DebugLevel, 1, "command message '%s'", name)
+				return nil
 			}
-			return fmt.Errorf("command message '%s' unsupported", name)
 		}
 		return fmt.Errorf("command message invalid 'name' data type <%s>", reflect.TypeOf(amf).Kind().String())
 	case rtmp.DataMessageAMF0, rtmp.DataMessageAMF3:
 		return c.handleDataMessage(msg)
 	case rtmp.SharedObjectMessageAMF0, rtmp.SharedObjectMessageAMF3:
 	case rtmp.AudioMessage:
+		return c.handleAudioMessage(msg)
 	case rtmp.VideoMessage:
+		return c.handleVideoMessage(msg)
 	case rtmp.AggregateMessage:
+	default:
+		log.Printf(log.DebugLevel, 1, "message type <%d>", msg.TypeID)
 	}
-	return fmt.Errorf("unsupported message type <%d>", msg.TypeID)
+	return nil
 }
 
 func (c *Conn) handleDataMessage(msg *rtmp.Message) (err error) {
@@ -146,13 +157,13 @@ func (c *Conn) handleDataMessage(msg *rtmp.Message) (err error) {
 }
 
 func (c *Conn) handleAudioMessage(msg *rtmp.Message) (err error) {
-	log.Debug("audio message")
+	// log.Debug("audio message")
 	c.publishStream.AddData(false, msg.Timestamp, msg.Data.Bytes())
 	return
 }
 
 func (c *Conn) handleVideoMessage(msg *rtmp.Message) (err error) {
-	log.Debug("video message")
+	// log.Debug("video message")
 	c.publishStream.AddData(true, msg.Timestamp, msg.Data.Bytes())
 	return
 }
@@ -257,16 +268,16 @@ func (c *Conn) handleCommandMessagePublish(msg *rtmp.Message) (err error) {
 	}
 	if _type != "live" {
 		// 只支持直播类型的推流
-		msg.InitCommandMessage("onStatus", tid, nil, map[string]string{
+		msg.InitCommandMessage("onStatus", tid, nil, map[string]interface{}{
 			"level":       "error",
 			"code":        "NetStream.Publish.Error",
 			"description": "server only support live",
 		})
 	} else {
-		c.publishStream, ok = c.server.AddPublishStream(c.connectUrl.Path)
+		c.publishStream, ok = c.server.AddPublishStream(c.connectUrl.Path, c.server.Timestamp)
 		if !ok {
 			// 已经有相同的流
-			msg.InitCommandMessage("onStatus", tid, nil, map[string]string{
+			msg.InitCommandMessage("onStatus", tid, nil, map[string]interface{}{
 				"level":       "error",
 				"code":        "NetStream.Publish.Error",
 				"description": "other stream is publishing",
@@ -277,11 +288,62 @@ func (c *Conn) handleCommandMessagePublish(msg *rtmp.Message) (err error) {
 		if err != nil {
 			return
 		}
-		msg.InitCommandMessage("onStatus", tid, nil, map[string]string{
+		msg.InitCommandMessage("onStatus", tid, nil, map[string]interface{}{
 			"level": "status",
 			"code":  "NetStream.Publish.Start",
 		})
 	}
+	err = msg.Write(c.conn, c.RemoteChunkSize)
+	if err != nil {
+		return
+	}
+	return c.conn.Flush()
+}
+
+func (c *Conn) handleCommandMessageFCPublish(msg *rtmp.Message) (err error) {
+	log.Debug("command message.'FCPublish'")
+	var amf interface{}
+	amf, err = rtmp.ReadAMF(&msg.Data)
+	if err != nil {
+		return err
+	}
+	// transaction id
+	tid, ok := amf.(float64)
+	if !ok {
+		return fmt.Errorf("command message.'FCPublish'.'transactionID' invalid data type <%s>", reflect.TypeOf(amf).Kind().String())
+	}
+	// command object is nil
+	amf, err = rtmp.ReadAMF(&msg.Data)
+	if err != nil {
+		return err
+	}
+	// publishing name
+	amf, err = rtmp.ReadAMF(&msg.Data)
+	if err != nil {
+		return err
+	}
+	_, ok = amf.(string)
+	if !ok {
+		return fmt.Errorf("command message.'FCPublish'.'publishing name' invalid data type <%s>", reflect.TypeOf(amf).Kind().String())
+	}
+	c.publishStream, ok = c.server.AddPublishStream(c.connectUrl.Path, c.server.Timestamp)
+	if !ok {
+		// 已经有相同的流
+		msg.InitCommandMessage("onStatus", tid, nil, map[string]interface{}{
+			"level":       "error",
+			"code":        "NetStream.Publish.Error",
+			"description": "other stream is publishing",
+		})
+	}
+	msg.InitUserControlMessageStreamBegin(c.streamID)
+	err = msg.Write(c.conn, c.RemoteChunkSize)
+	if err != nil {
+		return
+	}
+	msg.InitCommandMessage("onStatus", tid, nil, map[string]interface{}{
+		"level": "status",
+		"code":  "NetStream.Publish.Start",
+	})
 	err = msg.Write(c.conn, c.RemoteChunkSize)
 	if err != nil {
 		return
@@ -347,6 +409,11 @@ func (c *Conn) handleCommandMessageReceiveAudio(msg *rtmp.Message) (err error) {
 	return
 }
 
+func (c *Conn) handleCommandMessageReleaseStream(msg *rtmp.Message) (err error) {
+	log.Debug("command message.'releaseStream'")
+	return
+}
+
 func (c *Conn) handleCommandMessageCloseStream(msg *rtmp.Message) (err error) {
 	log.Debug("command message.'closeStream'")
 	return
@@ -403,11 +470,6 @@ func (c *Conn) handleCommandMessagePlay2(msg *rtmp.Message) (err error) {
 	if err != nil {
 		return
 	}
-	// len
-	// offset
-	// start
-	// streamName
-	// transition:append/appendAndWait/reset/resume/stop/swap/switch
 	return
 }
 
@@ -474,7 +536,7 @@ func (c *Conn) handleCommandMessagePlay(msg *rtmp.Message) (err error) {
 	}
 	stream := c.server.GetPublishStream(c.connectUrl.Path)
 	if stream == nil {
-		msg.InitCommandMessage("onStatus", 0, nil, map[string]string{
+		msg.InitCommandMessage("onStatus", 0, nil, map[string]interface{}{
 			"level": "error",
 			"Code":  "NetStream.Play.StreamNotFound",
 		})
@@ -501,7 +563,7 @@ func (c *Conn) handleCommandMessagePlay(msg *rtmp.Message) (err error) {
 		return
 	}
 	if reset {
-		msg.InitCommandMessage("onStatus", 0, nil, map[string]string{
+		msg.InitCommandMessage("onStatus", 0, nil, map[string]interface{}{
 			"level": "status",
 			"Code":  "NetStream.Play.Reset",
 		})
@@ -510,7 +572,7 @@ func (c *Conn) handleCommandMessagePlay(msg *rtmp.Message) (err error) {
 			return
 		}
 	}
-	msg.InitCommandMessage("onStatus", 0, nil, map[string]string{
+	msg.InitCommandMessage("onStatus", 0, nil, map[string]interface{}{
 		"level": "status",
 		"Code":  "NetStream.Play.Start",
 	})
@@ -587,7 +649,7 @@ func (c *Conn) handleCommandMessageConnect(msg *rtmp.Message) (err error) {
 	}
 	// optional user arguments
 	//
-	msg.InitControlMessageWindowAcknowledgementSize(c.server.WindowAckSize)
+	msg.InitControlMessageWindowAcknowledgementSize(c.server.AckSize)
 	err = msg.Write(c.conn, c.MessageReader.RemoteChunkSize)
 	if err != nil {
 		return

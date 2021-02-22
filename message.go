@@ -52,7 +52,7 @@ type Message struct {
 	Data      bytes.Buffer // 消息的数据
 }
 
-func WriteMessage(w io.Writer, chunkSize int, chunk *ChunkHeader, data []byte) error {
+func WriteMessage(w io.Writer, chunk *ChunkHeader, chunkSize uint32, data []byte) error {
 	// 第一个chunk
 	chunk.FMT = 0
 	chunk.MessageLength = uint32(len(data))
@@ -60,7 +60,7 @@ func WriteMessage(w io.Writer, chunkSize int, chunk *ChunkHeader, data []byte) e
 	if err != nil {
 		return err
 	}
-	n := len(data)
+	n := uint32(len(data))
 	if n > chunkSize {
 		n = chunkSize
 	}
@@ -76,7 +76,7 @@ func WriteMessage(w io.Writer, chunkSize int, chunk *ChunkHeader, data []byte) e
 		if err != nil {
 			return err
 		}
-		n = len(data)
+		n = uint32(len(data))
 		if n > chunkSize {
 			n = chunkSize
 		}
@@ -89,47 +89,13 @@ func WriteMessage(w io.Writer, chunkSize int, chunk *ChunkHeader, data []byte) e
 	return nil
 }
 
-func (m *Message) Write(w io.Writer, chunkSize int) error {
+func (m *Message) Write(w io.Writer, chunkSize uint32) error {
 	var chunk ChunkHeader
-	// 第一个chunk
 	chunk.CSID = m.CSID
-	chunk.FMT = 0
-	chunk.MessageLength = uint32(m.Data.Len())
 	chunk.MessageTypeID = m.TypeID
 	chunk.MessageStreamID = m.StreamID
 	chunk.MessageTimestamp = m.Timestamp
-	err := chunk.Write(w)
-	if err != nil {
-		return err
-	}
-	d := m.Data.Bytes()
-	n := len(d)
-	if n > chunkSize {
-		n = chunkSize
-	}
-	_, err = w.Write(d[:n])
-	if err != nil {
-		return err
-	}
-	d = d[n:]
-	// 其他的chunk
-	chunk.FMT = 3
-	for len(d) > 0 {
-		err = chunk.Write(w)
-		if err != nil {
-			return err
-		}
-		n = len(d)
-		if n > chunkSize {
-			n = chunkSize
-		}
-		_, err = w.Write(d[:n])
-		if err != nil {
-			return err
-		}
-		d = d[n:]
-	}
-	return nil
+	return WriteMessage(w, &chunk, chunkSize, m.Data.Bytes())
 }
 
 func (m *Message) PutBigEndianUint16(n uint16) {
@@ -257,26 +223,31 @@ func (m *Message) InitCommandMessage(name string, obj ...interface{}) {
 }
 
 type MessageReader struct {
-	message         []*Message  // key:chunk stream id
-	chunkHeader     ChunkHeader // chunk头
-	localChunkSize  int         // 本地chunk的大小
-	RemoteChunkSize int         // 对方chunk的大小
-	MaxChunkSize    uint32      // 对方可以设置的最大的chunk size，为0表示不限制
-	AckSize         uint32      // Window Acknowledge Size消息的值
-	Ack             uint32      // Acknowledgement消息的值
-	BandWidth       uint32      // Set Bandwith消息的值
-	BandWidthLimit  byte        // Set Bandwith消息的值
-	ack             Message
+	message              []*Message  // key:chunk stream id
+	chunkHeader          ChunkHeader // chunk头
+	ChunkSize            uint32      // 本地chunk的大小
+	AckSize              uint32      // Window Acknowledge Size消息的值
+	Ack                  uint32      // Acknowledgement消息的值
+	BandWidth            uint32      // Set Bandwith消息的值
+	BandWidthLimit       byte        // Set Bandwith消息的值
+	RemoteAckSize        uint32      // Window Acknowledge Size消息的值
+	RemoteAck            uint32      // Acknowledgement消息的值
+	RemoteChunkSize      uint32      // 对方chunk的大小
+	RemoteBandWidth      uint32      // Set Bandwith消息的值
+	RemoteBandWidthLimit byte        // Set Bandwith消息的值
+	ackMsg               Message
 }
 
-func (m *MessageReader) Init() {
-	m.AckSize = 500 * 1024
-	m.localChunkSize = ChunkSize
-	m.RemoteChunkSize = ChunkSize
+func (m *MessageReader) Init(ackSize, bandWidth uint32, bandWidthLimit byte) {
 	m.message = make([]*Message, 0)
-	m.ack.InitControlMessage()
-	m.ack.TypeID = ControlMessageAcknowledgement
-	m.ack.length = 4
+	m.ackMsg.InitControlMessage()
+	m.ackMsg.TypeID = ControlMessageAcknowledgement
+	m.ackMsg.length = 4
+	m.AckSize = ackSize
+	m.BandWidth = bandWidth
+	m.BandWidthLimit = bandWidthLimit
+	m.ChunkSize = ChunkSize
+	m.RemoteChunkSize = ChunkSize
 }
 
 func (m *MessageReader) getMessage(csid uint32) *Message {
@@ -292,21 +263,17 @@ func (m *MessageReader) getMessage(csid uint32) *Message {
 }
 
 // 读取一个完整的消息，
-func (m *MessageReader) Read(conn io.ReadWriter) (*Message, error) {
-	var n int
-	var err error
+func (m *MessageReader) ReadLoop(conn io.ReadWriter, handle func(msg *Message) error) (err error) {
+	var n uint32
 	var msg *Message
 	for {
 		// 读取chunk header
 		err = m.chunkHeader.Read(conn)
 		if err != nil {
-			return nil, err
+			return err
 		}
 		// 消息
 		msg = m.getMessage(m.chunkHeader.CSID)
-		if msg.length == uint32(msg.Data.Len()) {
-			msg.Data.Reset()
-		}
 		// 消息头
 		switch m.chunkHeader.FMT {
 		case 0:
@@ -332,13 +299,13 @@ func (m *MessageReader) Read(conn io.ReadWriter) (*Message, error) {
 		}
 		// 消息数据
 		if int(msg.length) > msg.Data.Len() {
-			n = int(msg.length) - msg.Data.Len()
-			if n > m.localChunkSize {
-				n = m.localChunkSize
+			n = msg.length - uint32(msg.Data.Len())
+			if n > m.ChunkSize {
+				n = m.ChunkSize
 			}
 			_, err = io.CopyN(&msg.Data, conn, int64(n))
 			if err != nil {
-				return nil, err
+				return err
 			}
 			if int(msg.length) > msg.Data.Len() {
 				continue
@@ -347,51 +314,36 @@ func (m *MessageReader) Read(conn io.ReadWriter) (*Message, error) {
 		// 发送ack
 		m.Ack += msg.length
 		if m.AckSize <= m.Ack {
-			m.ack.Data.Reset()
-			m.ack.PutBigEndianUint32(m.Ack)
-			err = m.ack.Write(conn, m.localChunkSize)
+			m.ackMsg.Data.Reset()
+			m.ackMsg.PutBigEndianUint32(m.Ack)
+			err = m.ackMsg.Write(conn, m.ChunkSize)
 			if err != nil {
-				return nil, err
+				return err
 			}
 			m.Ack = 0
 		}
 		switch msg.TypeID {
 		case ControlMessageSetChunkSize:
-			err = m.HandleControlMessageSetChunkSize(msg)
+			err = m.handleControlMessageSetChunkSize(msg)
 		case ControlMessageAbort:
-			err = m.HandleControlMessageAbort(msg)
+			err = m.handleControlMessageAbort(msg)
 		case ControlMessageAcknowledgement:
-			err = m.HandleControlMessageAcknowledgement(msg)
+			err = m.handleControlMessageAcknowledgement(msg)
 		case ControlMessageWindowAcknowledgementSize:
-			err = m.HandleControlMessageWindowAcknowledgementSize(msg)
+			err = m.handleControlMessageWindowAcknowledgementSize(msg)
 		case ControlMessageSetBandWidth:
-			err = m.HandleControlMessageSetBandWidth(msg)
+			err = m.handleControlMessageSetBandWidth(msg)
 		default:
-			return msg, nil
+			err = handle(msg)
 		}
 		if err != nil {
-			return nil, err
+			return err
 		}
+		msg.Data.Reset()
 	}
 }
 
-func (m *MessageReader) HandleControlMessage(msg *Message) (err error) {
-	switch msg.TypeID {
-	case ControlMessageSetChunkSize:
-		err = m.HandleControlMessageSetChunkSize(msg)
-	case ControlMessageAbort:
-		err = m.HandleControlMessageAbort(msg)
-	case ControlMessageAcknowledgement:
-		err = m.HandleControlMessageAcknowledgement(msg)
-	case ControlMessageWindowAcknowledgementSize:
-		err = m.HandleControlMessageWindowAcknowledgementSize(msg)
-	case ControlMessageSetBandWidth:
-		err = m.HandleControlMessageSetBandWidth(msg)
-	}
-	return
-}
-
-func (m *MessageReader) HandleControlMessageSetBandWidth(msg *Message) (err error) {
+func (m *MessageReader) handleControlMessageSetBandWidth(msg *Message) (err error) {
 	if msg.length != 5 {
 		return fmt.Errorf("control message 'set bandwidth' invalid length <%d>", msg.length)
 	}
@@ -401,7 +353,7 @@ func (m *MessageReader) HandleControlMessageSetBandWidth(msg *Message) (err erro
 	return
 }
 
-func (m *MessageReader) HandleControlMessageWindowAcknowledgementSize(msg *Message) (err error) {
+func (m *MessageReader) handleControlMessageWindowAcknowledgementSize(msg *Message) (err error) {
 	if msg.length != 4 {
 		return fmt.Errorf("control message 'window acknowledgement size' invalid length <%d>", msg.length)
 	}
@@ -409,7 +361,7 @@ func (m *MessageReader) HandleControlMessageWindowAcknowledgementSize(msg *Messa
 	return
 }
 
-func (m *MessageReader) HandleControlMessageAcknowledgement(msg *Message) (err error) {
+func (m *MessageReader) handleControlMessageAcknowledgement(msg *Message) (err error) {
 	if msg.length != 4 {
 		return fmt.Errorf("control message 'acknowledgement' invalid length <%d>", msg.length)
 	}
@@ -417,7 +369,7 @@ func (m *MessageReader) HandleControlMessageAcknowledgement(msg *Message) (err e
 	return
 }
 
-func (m *MessageReader) HandleControlMessageAbort(msg *Message) (err error) {
+func (m *MessageReader) handleControlMessageAbort(msg *Message) (err error) {
 	if msg.length != 4 {
 		return fmt.Errorf("control message 'abort' invalid length <%d>", msg.length)
 	}
@@ -427,20 +379,15 @@ func (m *MessageReader) HandleControlMessageAbort(msg *Message) (err error) {
 	return
 }
 
-func (m *MessageReader) HandleControlMessageSetChunkSize(msg *Message) (err error) {
+func (m *MessageReader) handleControlMessageSetChunkSize(msg *Message) (err error) {
 	if msg.length != 4 {
 		return fmt.Errorf("control message 'set chunk size' invalid length <%d>", msg.length)
 	}
 	// chunk size
 	size := binary.BigEndian.Uint32(msg.Data.Bytes())
-	// 比设定的大
-	if m.MaxChunkSize > 0 && size > m.MaxChunkSize {
-		return fmt.Errorf("control message 'set chunk size' <%d> too big", size)
+	if size > MaxChunkSize {
+		size = MaxChunkSize
 	}
-	// 由于消息的最大长度为 16777215(0xFFFFFF)
-	if size > 0xFFFFFF {
-		size = 0xFFFFFF
-	}
-	m.localChunkSize = int(size)
+	m.ChunkSize = size
 	return
 }

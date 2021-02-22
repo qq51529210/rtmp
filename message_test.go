@@ -16,7 +16,7 @@ func TestMessage(t *testing.T) {
 	m1.Write(&b, 8)
 
 	var r MessageReader
-	r.Init()
+	r.Init(50000, 50000, 1)
 	m2, err := r.Read(&b)
 	if err != nil {
 		t.Fatal(err)

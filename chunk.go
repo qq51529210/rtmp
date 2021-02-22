@@ -8,6 +8,7 @@ import (
 const (
 	MaxMessageTimestamp = 0xffffff
 	ChunkSize           = 128 // 默认的大小
+	MaxChunkSize        = 0xffffff
 )
 
 type ChunkHeader struct {

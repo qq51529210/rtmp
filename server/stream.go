@@ -18,6 +18,7 @@ func init() {
 func PutStreamData(d *StreamData) {
 	d.count--
 	if d.count == 0 {
+		d.Next = nil
 		StreamDataPool.Put(d)
 	}
 }
@@ -49,6 +50,15 @@ func (s *Stream) AddData(isVideo bool, timestamp uint32, data []byte) {
 	b.Data = b.Data[:0]
 	b.Data = append(b.Data, data...)
 	s.lock.Lock()
+	if s.head == nil {
+		s.head = b
+		s.tail = b
+	} else {
+		if s.tail != nil {
+			s.tail.Next = b
+		}
+		s.tail = b
+	}
 	if b.Timestamp-s.head.Timestamp >= s.timestamp {
 		h := s.head
 		s.head = s.head.Next

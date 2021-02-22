@@ -13,10 +13,11 @@ type Server struct {
 	Address           string
 	listener          net.Listener
 	running           bool
-	WindowAckSize     uint32
+	Timestamp         uint32
+	AckSize           uint32
 	BandWidth         uint32
 	BandWidthLimit    byte
-	MaxChunkSize      int
+	MaxChunkSize      uint32
 	Version           uint32
 	publishStreamLock sync.RWMutex
 	publishStream     map[string]*Stream
@@ -27,7 +28,8 @@ func (s *Server) Listen() (err error) {
 	if err != nil {
 		return
 	}
-	s.WindowAckSize = 1024 * 500
+	s.Timestamp = 1000 * 2
+	s.AckSize = 1024 * 500
 	s.BandWidth = 1024 * 500
 	s.BandWidthLimit = 2
 	s.publishStream = make(map[string]*Stream)
@@ -44,32 +46,22 @@ func (s *Server) Listen() (err error) {
 }
 
 func (s *Server) ServeConn(conn net.Conn) {
+	log.Debug(conn.RemoteAddr().String())
 	c := new(Conn)
 	c.server = s
 	c.conn = bufio.NewReadWriter(bufio.NewReader(conn), bufio.NewWriter(conn))
+	c.MessageReader.Init(s.AckSize, s.BandWidth, s.BandWidthLimit)
 	defer func() {
 		if c.publishStream != nil {
 			s.DeleteStream(c.connectUrl.Path)
 		}
 		conn.Close()
 	}()
-	_, err := rtmp.HandshakeAccept(conn, s.Version)
+	// 验证是不通过，但是不影响
+	rtmp.HandshakeAccept(conn, s.Version)
+	err := c.MessageReader.ReadLoop(c.conn, c.handleMessage)
 	if err != nil {
 		log.Error(err)
-		return
-	}
-	var msg *rtmp.Message
-	for {
-		msg, err = c.MessageReader.Read(c.conn)
-		if err != nil {
-			log.Error(err)
-			return
-		}
-		err = c.handleMessage(msg)
-		if err != nil {
-			log.Error(err)
-			return
-		}
 	}
 }
 
@@ -80,15 +72,16 @@ func (s *Server) GetPublishStream(name string) *Stream {
 	return stream
 }
 
-func (s *Server) AddPublishStream(name string) (*Stream, bool) {
+func (s *Server) AddPublishStream(name string, timestamp uint32) (*Stream, bool) {
 	s.publishStreamLock.Lock()
 	stream, ok := s.publishStream[name]
 	if !ok {
 		stream = new(Stream)
+		stream.timestamp = timestamp
 		stream.Valid = true
 	}
 	s.publishStreamLock.Unlock()
-	return stream, ok
+	return stream, !ok
 }
 
 func (s *Server) DeleteStream(name string) {
@@ -99,4 +92,14 @@ func (s *Server) DeleteStream(name string) {
 		stream.Valid = false
 	}
 	s.publishStreamLock.Unlock()
+	go func(stream *Stream) {
+		if stream == nil {
+			return
+		}
+		b := stream.head
+		for b != nil {
+			PutStreamData(b)
+			b = b.Next
+		}
+	}(stream)
 }

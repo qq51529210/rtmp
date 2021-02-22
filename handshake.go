@@ -93,7 +93,7 @@ func handshakeGenSchema0Digest(buff, digest []byte, hashPool *sync.Pool) {
 	h.Write(buff[offset+32:])
 	h.Sum(digest[:0])
 	hashPool.Put(h)
-	copy(buff[offset:], digest[:])
+	copy(buff[offset:], digest)
 }
 
 func handshakeGenSchema1Digest(buff, digest []byte, hashPool *sync.Pool) {
@@ -104,50 +104,35 @@ func handshakeGenSchema1Digest(buff, digest []byte, hashPool *sync.Pool) {
 	h.Write(buff[offset+32:])
 	h.Sum(digest[:0])
 	hashPool.Put(h)
-	copy(buff[offset:], digest[:])
+	copy(buff[offset:], digest)
 }
 
 func handshakeCheckDigest(buff, digest []byte, hashPool *sync.Pool) (schema int) {
 	h := hashPool.Get().(hash.Hash)
 	var sum handshakeDigest
 	// schema 0
-	offset := handshakeSchema0DigestOffset(buff)
+	n1 := handshakeSchema0DigestOffset(buff)
+	n2 := n1 + 32
 	h.Reset()
-	h.Write(buff[1:offset])
-	h.Write(buff[offset+32:])
+	h.Write(buff[1:n1])
+	h.Write(buff[n2:])
 	h.Sum(sum[:0])
-	// 检查
-	p := buff[offset:]
-	find := true
-	for i := 0; i < len(sum); i++ {
-		if sum[i] != p[i] {
-			find = false
-			break
-		}
-	}
-	if find {
+	if bytes.Compare(buff[n1:n2], sum[:]) == 0 {
 		hashPool.Put(h)
-		copy(digest[:], buff[offset:])
+		copy(digest[:], sum[:])
 		return
 	}
-	schema = 1
 	// schema 1
-	offset = handshakeSchema1DigestOffset(buff)
+	n1 = handshakeSchema1DigestOffset(buff)
+	n2 = n1 + 32
 	h.Reset()
-	h.Write(buff[1:offset])
-	h.Write(buff[offset+32:])
+	h.Write(buff[1:n1])
+	h.Write(buff[n2:])
 	h.Sum(sum[:0])
-	p = buff[offset:]
-	find = true
-	for i := 0; i < len(sum); i++ {
-		if sum[i] != p[i] {
-			find = false
-			break
-		}
-	}
-	if find {
+	if bytes.Compare(buff[n1:n2], sum[:]) == 0 {
 		hashPool.Put(h)
-		copy(digest[:], buff[offset:])
+		copy(digest[:], sum[:])
+		schema = 1
 		return
 	}
 	hashPool.Put(h)
@@ -164,7 +149,7 @@ func handshakeGenDigest2(buff, data []byte, hashPool *sync.Pool) {
 	hashPool.Put(h)
 	// 1537-32=1505
 	h = hmac.New(sha256.New, digest[:])
-	h.Write(buff[1:1505])
+	h.Write(buff[9:1505])
 	h.Sum(digest[:0])
 	copy(buff[1505:], digest[:])
 	return
@@ -179,7 +164,7 @@ func handshakeCheckDigest2(buff, data []byte, hashPool *sync.Pool) bool {
 	hashPool.Put(h)
 	// 1537-32=1505
 	h = hmac.New(sha256.New, digest[:])
-	h.Write(buff[1:1505])
+	h.Write(buff[9:1505])
 	h.Sum(digest[:0])
 	return bytes.Compare(digest[:], buff[1505:]) == 0
 }
@@ -268,7 +253,7 @@ func handshakeComplexAccept(conn io.ReadWriter, buff []byte, version uint32) err
 	// s2
 	binary.BigEndian.PutUint32(buff[1:], c1Time)
 	binary.BigEndian.PutUint32(buff[5:], uint32(time.Now().Unix()))
-	mathRand.Read(buff[9:])
+	mathRand.Read(buff[9:1505])
 	handshakeGenDigest2(buff, c1Digest[:], &fmsKeyPool)
 	_, err = conn.Write(buff[1:])
 	if err != nil {
@@ -279,7 +264,7 @@ func handshakeComplexAccept(conn io.ReadWriter, buff []byte, version uint32) err
 	if err != nil {
 		return err
 	}
-	if !handshakeCheckDigest2(buff, s1Digest[:], &fpKeyPool) {
+	if !handshakeCheckDigest2(buff, s1Digest[:], &fmsKeyPool) {
 		return errDigestC2
 	}
 	c2Time := binary.BigEndian.Uint32(buff[1:])
@@ -370,7 +355,7 @@ func handshakeComplexDial(conn io.ReadWriter, buff []byte, c1Time, version uint3
 	// c2
 	binary.BigEndian.PutUint32(buff[1:], s1Time)
 	binary.BigEndian.PutUint32(buff[5:], uint32(time.Now().Unix()))
-	mathRand.Read(buff[9:])
+	mathRand.Read(buff[9:1505])
 	handshakeGenDigest2(buff, s1Digest[:], &fpKeyPool)
 	_, err = conn.Write(buff[1:])
 	if err != nil {
