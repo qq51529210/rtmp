@@ -40,8 +40,7 @@ func (c *ChunkHeader) Read(r io.Reader) (err error) {
 		if err != nil {
 			return
 		}
-		c.MessageTimestamp = binary.BigEndian.Uint32(c.buff[:])
-		// c.ExtendedTimestamp = binary.BigEndian.Uint32(c.buff[:])
+		c.ExtendedTimestamp = binary.BigEndian.Uint32(c.buff[:])
 	}
 	return
 }

@@ -149,7 +149,7 @@ func handshakeGenDigest2(buff, data []byte, hashPool *sync.Pool) {
 	hashPool.Put(h)
 	// 1537-32=1505
 	h = hmac.New(sha256.New, digest[:])
-	h.Write(buff[9:1505])
+	h.Write(buff[1:1505])
 	h.Sum(digest[:0])
 	copy(buff[1505:], digest[:])
 	return
@@ -164,7 +164,7 @@ func handshakeCheckDigest2(buff, data []byte, hashPool *sync.Pool) bool {
 	hashPool.Put(h)
 	// 1537-32=1505
 	h = hmac.New(sha256.New, digest[:])
-	h.Write(buff[9:1505])
+	h.Write(buff[1:1505])
 	h.Sum(digest[:0])
 	return bytes.Compare(digest[:], buff[1505:]) == 0
 }
@@ -264,7 +264,7 @@ func handshakeComplexAccept(conn io.ReadWriter, buff []byte, version uint32) err
 	if err != nil {
 		return err
 	}
-	if !handshakeCheckDigest2(buff, s1Digest[:], &fmsKeyPool) {
+	if !handshakeCheckDigest2(buff, s1Digest[:], &fpKeyPool) {
 		return errDigestC2
 	}
 	c2Time := binary.BigEndian.Uint32(buff[1:])

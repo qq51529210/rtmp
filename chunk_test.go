@@ -10,7 +10,7 @@ func TestChunkHeader(t *testing.T) {
 	var c1, c2 ChunkHeader
 	c1.FMT = 0
 	c1.CSID = 123
-	c1.MessageTimestamp = 12345678
+	c1.MessageTimestamp = MaxMessageTimestamp
 	c1.MessageLength = 1234
 	c1.MessageTypeID = 32
 	c1.MessageStreamID = 123

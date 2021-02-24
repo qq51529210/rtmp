@@ -104,26 +104,28 @@ func (c *Conn) ReadMessage() (*Message, error) {
 			if !ok {
 				msg = c.newMessage()
 				msg.Data.Reset()
-				c.readMessage[c.readChunkHeader.CSID] = msg
 			}
 		}
 		switch c.readChunkHeader.FMT {
 		case 0:
 			msg.Timestamp = c.readChunkHeader.MessageTimestamp
+			if c.readChunkHeader.MessageTimestamp >= MaxMessageTimestamp {
+				msg.Timestamp = c.readChunkHeader.ExtendedTimestamp
+			}
 			msg.Length = c.readChunkHeader.MessageLength
 			msg.TypeID = c.readChunkHeader.MessageTypeID
 			msg.StreamID = c.readChunkHeader.MessageStreamID
 		case 1:
-			if c.readChunkHeader.MessageTimestamp > MaxMessageTimestamp {
-				msg.Timestamp = c.readChunkHeader.MessageTimestamp
+			if c.readChunkHeader.MessageTimestamp >= MaxMessageTimestamp {
+				msg.Timestamp = c.readChunkHeader.ExtendedTimestamp
 			} else {
 				msg.Timestamp += c.readChunkHeader.MessageTimestamp
 			}
 			msg.Length = c.readChunkHeader.MessageLength
 			msg.TypeID = c.readChunkHeader.MessageTypeID
 		case 2:
-			if c.readChunkHeader.MessageTimestamp > MaxMessageTimestamp {
-				msg.Timestamp = c.readChunkHeader.MessageTimestamp
+			if c.readChunkHeader.MessageTimestamp >= MaxMessageTimestamp {
+				msg.Timestamp = c.readChunkHeader.ExtendedTimestamp
 			} else {
 				msg.Timestamp += c.readChunkHeader.MessageTimestamp
 			}
@@ -165,11 +167,18 @@ func (c *Conn) ReadMessage() (*Message, error) {
 					c.lastLength = msg.Length
 					c.lastTimestamp = msg.Timestamp
 					// 返回
-					delete(c.readMessage, c.readChunkHeader.CSID)
+					if ok {
+						delete(c.readMessage, c.readChunkHeader.CSID)
+					}
 					return msg, nil
 				}
 				if err != nil {
 					return nil, err
+				}
+			} else {
+				// 没读完，先缓存
+				if !ok {
+					c.readMessage[c.readChunkHeader.CSID] = msg
 				}
 			}
 		}
