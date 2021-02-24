@@ -50,7 +50,7 @@ func (s *Server) ServeConn(conn net.Conn) {
 	c := new(Conn)
 	c.server = s
 	c.conn = bufio.NewReadWriter(bufio.NewReader(conn), bufio.NewWriter(conn))
-	c.MessageReader.Init(s.AckSize, s.BandWidth, s.BandWidthLimit)
+	c.msg.Init(s.AckSize, s.BandWidth, s.BandWidthLimit)
 	defer func() {
 		if c.publishStream != nil {
 			s.DeleteStream(c.connectUrl.Path)
@@ -59,7 +59,7 @@ func (s *Server) ServeConn(conn net.Conn) {
 	}()
 	// 验证是不通过，但是不影响
 	rtmp.HandshakeAccept(conn, s.Version)
-	err := c.MessageReader.ReadLoop(c.conn, c.handleMessage)
+	err := c.msg.ReadLoop(c.conn, c.handleMessage)
 	if err != nil {
 		log.Error(err)
 	}

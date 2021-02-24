@@ -1,3 +1,5 @@
 github.com/qq51529210/common v0.0.0-20200910140314-8c73971e6781/go.mod h1:0x848yzNjOkM7TbzqzbVSutIaC43mt/42LBl5g75ZmM=
 github.com/qq51529210/log v0.0.0-20210117125540-a1f2470bb5d9 h1:F9wbczYSfV1bajaBcK/vxhrbj0OlMlDlUf5XDoBO+uU=
 github.com/qq51529210/log v0.0.0-20210117125540-a1f2470bb5d9/go.mod h1:nyZkG87n0hpMExiw/4MSenRmRL3y+YRrbBtQlUjVFyU=
+github.com/qq51529210/log v0.0.0-20210223113317-be302ce30ebf h1:7t3dyCVGbqwzVL78yswocl6qJMxX53/6RGl/B+uBILU=
+github.com/qq51529210/log v0.0.0-20210223113317-be302ce30ebf/go.mod h1:pB4GlQNhq0fW3bPKt6kPadmJjWKXVeYM/5awHGVRhHQ=

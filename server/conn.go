@@ -23,15 +23,14 @@ func init() {
 }
 
 type Conn struct {
-	rtmp.MessageReader
-	connectUrl *url.URL
-	streamID   uint32
-	// playStream    *Stream
+	msg           rtmp.MessageReader
+	conn          *bufio.ReadWriter
+	connectUrl    *url.URL
+	streamID      uint32
 	publishStream *Stream
 	receiveVideo  bool
 	receiveAudio  bool
 	playPause     bool
-	conn          *bufio.ReadWriter
 	server        *Server
 	playChan      chan *StreamData
 }
@@ -55,7 +54,7 @@ func (c *Conn) play(stream *Stream) {
 		if chunk.MessageTimestamp >= rtmp.MaxMessageTimestamp {
 			chunk.MessageTimestamp = rtmp.MaxMessageTimestamp
 		}
-		err = rtmp.WriteMessage(c.conn, &chunk, c.MessageReader.RemoteChunkSize, data.Data)
+		err = rtmp.WriteMessage(c.conn, &chunk, c.msg.RemoteChunkSize, data.Data)
 		if err != nil {
 			log.Error(err)
 			break
@@ -78,6 +77,7 @@ func (c *Conn) handleMessage(msg *rtmp.Message) error {
 		p := msg.Data.Bytes()
 		event := binary.BigEndian.Uint16(p)
 		p = p[2:]
+		log.Debug(rtmp.UserControlMessageString(event))
 		switch event {
 		case rtmp.UserControlMessageStreamBegin:
 			return c.handleUserControlMessageStreamBegin(p)
@@ -94,7 +94,7 @@ func (c *Conn) handleMessage(msg *rtmp.Message) error {
 		case rtmp.UserControlMessagePingResponse:
 			return c.handleUserControlMessagePingResponse(p)
 		default:
-			log.Printf(log.DebugLevel, 0, "user control message event <%d>", event)
+			return nil
 		}
 	case rtmp.CommandMessageAMF0, rtmp.CommandMessageAMF3:
 		amf, err := rtmp.ReadAMF(&msg.Data)
@@ -102,6 +102,7 @@ func (c *Conn) handleMessage(msg *rtmp.Message) error {
 			return err
 		}
 		if name, ok := amf.(string); ok {
+			log.Printf(log.DebugLevel, 0, "command message '%s'", name)
 			switch name {
 			case "connect":
 				return c.handleCommandMessageConnect(msg)
@@ -131,8 +132,9 @@ func (c *Conn) handleMessage(msg *rtmp.Message) error {
 				return c.handleCommandMessageSeek(msg)
 			case "pause":
 				return c.handleCommandMessagePause(msg)
+			case "onMetaData":
+				return c.handleCommandMessageMetaData(msg)
 			default:
-				log.Printf(log.DebugLevel, 1, "command message '%s'", name)
 				return nil
 			}
 		}
@@ -140,15 +142,27 @@ func (c *Conn) handleMessage(msg *rtmp.Message) error {
 	case rtmp.DataMessageAMF0, rtmp.DataMessageAMF3:
 		return c.handleDataMessage(msg)
 	case rtmp.SharedObjectMessageAMF0, rtmp.SharedObjectMessageAMF3:
+		return c.handleSharedObjectMessage(msg)
 	case rtmp.AudioMessage:
 		return c.handleAudioMessage(msg)
 	case rtmp.VideoMessage:
 		return c.handleVideoMessage(msg)
 	case rtmp.AggregateMessage:
+		return c.handleAggregateMessage(msg)
 	default:
-		log.Printf(log.DebugLevel, 1, "message type <%d>", msg.TypeID)
+		log.Printf(log.DebugLevel, 0, "message type <%d>", msg.TypeID)
 	}
 	return nil
+}
+
+func (c *Conn) handleAggregateMessage(msg *rtmp.Message) (err error) {
+	log.Debug("aggregate message")
+	return
+}
+
+func (c *Conn) handleSharedObjectMessage(msg *rtmp.Message) (err error) {
+	log.Debug("shared object message")
+	return
 }
 
 func (c *Conn) handleDataMessage(msg *rtmp.Message) (err error) {
@@ -157,19 +171,31 @@ func (c *Conn) handleDataMessage(msg *rtmp.Message) (err error) {
 }
 
 func (c *Conn) handleAudioMessage(msg *rtmp.Message) (err error) {
-	// log.Debug("audio message")
+	log.Debug("audio message")
 	c.publishStream.AddData(false, msg.Timestamp, msg.Data.Bytes())
 	return
 }
 
 func (c *Conn) handleVideoMessage(msg *rtmp.Message) (err error) {
-	// log.Debug("video message")
+	log.Debug("video message")
 	c.publishStream.AddData(true, msg.Timestamp, msg.Data.Bytes())
 	return
 }
 
+func (c *Conn) handleCommandMessageMetaData(msg *rtmp.Message) (err error) {
+	var amf interface{}
+	amf, err = rtmp.ReadAMF(&msg.Data)
+	if err != nil {
+		return
+	}
+	var commandObject map[string]interface{}
+	commandObject, ok = amf.(map[string]interface{})
+	if !ok {
+		return fmt.Errorf("command message.'connect'.'command object' invalid data type <%s>", reflect.TypeOf(amf).Kind().String())
+	}
+}
+
 func (c *Conn) handleCommandMessagePause(msg *rtmp.Message) (err error) {
-	log.Debug("command message.'pause'")
 	var amf interface{}
 	// transaction id
 	amf, err = rtmp.ReadAMF(&msg.Data)
@@ -203,7 +229,6 @@ func (c *Conn) handleCommandMessagePause(msg *rtmp.Message) (err error) {
 }
 
 func (c *Conn) handleCommandMessageSeek(msg *rtmp.Message) (err error) {
-	log.Debug("command message.'seek'")
 	var amf interface{}
 	// transaction id
 	amf, err = rtmp.ReadAMF(&msg.Data)
@@ -232,7 +257,6 @@ func (c *Conn) handleCommandMessageSeek(msg *rtmp.Message) (err error) {
 }
 
 func (c *Conn) handleCommandMessagePublish(msg *rtmp.Message) (err error) {
-	log.Debug("command message.'publish'")
 	var amf interface{}
 	amf, err = rtmp.ReadAMF(&msg.Data)
 	if err != nil {
@@ -301,7 +325,6 @@ func (c *Conn) handleCommandMessagePublish(msg *rtmp.Message) (err error) {
 }
 
 func (c *Conn) handleCommandMessageFCPublish(msg *rtmp.Message) (err error) {
-	log.Debug("command message.'FCPublish'")
 	var amf interface{}
 	amf, err = rtmp.ReadAMF(&msg.Data)
 	if err != nil {
@@ -352,7 +375,6 @@ func (c *Conn) handleCommandMessageFCPublish(msg *rtmp.Message) (err error) {
 }
 
 func (c *Conn) handleCommandMessageReceiveVideo(msg *rtmp.Message) (err error) {
-	log.Debug("command message.'receiveVideo'")
 	var amf interface{}
 	// transaction id
 	amf, err = rtmp.ReadAMF(&msg.Data)
@@ -381,7 +403,6 @@ func (c *Conn) handleCommandMessageReceiveVideo(msg *rtmp.Message) (err error) {
 }
 
 func (c *Conn) handleCommandMessageReceiveAudio(msg *rtmp.Message) (err error) {
-	log.Debug("command message.'receiveAudio'")
 	var amf interface{}
 	// transaction id
 	amf, err = rtmp.ReadAMF(&msg.Data)
@@ -410,17 +431,14 @@ func (c *Conn) handleCommandMessageReceiveAudio(msg *rtmp.Message) (err error) {
 }
 
 func (c *Conn) handleCommandMessageReleaseStream(msg *rtmp.Message) (err error) {
-	log.Debug("command message.'releaseStream'")
 	return
 }
 
 func (c *Conn) handleCommandMessageCloseStream(msg *rtmp.Message) (err error) {
-	log.Debug("command message.'closeStream'")
 	return
 }
 
 func (c *Conn) handleCommandMessageDeleteStream(msg *rtmp.Message) (err error) {
-	log.Debug("command message.'deleteStream'")
 	var amf interface{}
 	// transaction id
 	amf, err = rtmp.ReadAMF(&msg.Data)
@@ -449,7 +467,6 @@ func (c *Conn) handleCommandMessageDeleteStream(msg *rtmp.Message) (err error) {
 }
 
 func (c *Conn) handleCommandMessagePlay2(msg *rtmp.Message) (err error) {
-	log.Debug("command message.'play2'")
 	var amf interface{}
 	// transaction id
 	amf, err = rtmp.ReadAMF(&msg.Data)
@@ -474,14 +491,13 @@ func (c *Conn) handleCommandMessagePlay2(msg *rtmp.Message) (err error) {
 }
 
 func (c *Conn) handleCommandMessagePlay(msg *rtmp.Message) (err error) {
-	log.Debug("command message.'play'")
 	var amf interface{}
 	// transaction id
 	amf, err = rtmp.ReadAMF(&msg.Data)
 	if err != nil {
 		return
 	}
-	_, ok := amf.(float64)
+	tid, ok := amf.(float64)
 	if !ok {
 		return fmt.Errorf("command message.'play'.'transactionID' invalid data type <%s>", reflect.TypeOf(amf).Kind().String())
 	}
@@ -536,7 +552,7 @@ func (c *Conn) handleCommandMessagePlay(msg *rtmp.Message) (err error) {
 	}
 	stream := c.server.GetPublishStream(c.connectUrl.Path)
 	if stream == nil {
-		msg.InitCommandMessage("onStatus", 0, nil, map[string]interface{}{
+		msg.InitCommandMessage("onStatus", tid, nil, map[string]interface{}{
 			"level": "error",
 			"Code":  "NetStream.Play.StreamNotFound",
 		})
@@ -547,7 +563,7 @@ func (c *Conn) handleCommandMessagePlay(msg *rtmp.Message) (err error) {
 		return c.conn.Flush()
 	}
 	//
-	msg.InitControlMessageSetChunkSize(uint32(c.RemoteChunkSize))
+	msg.InitControlMessageSetChunkSize(c.RemoteChunkSize)
 	err = msg.Write(c.conn, c.MessageReader.RemoteChunkSize)
 	if err != nil {
 		return
@@ -563,7 +579,7 @@ func (c *Conn) handleCommandMessagePlay(msg *rtmp.Message) (err error) {
 		return
 	}
 	if reset {
-		msg.InitCommandMessage("onStatus", 0, nil, map[string]interface{}{
+		msg.InitCommandMessage("onStatus", tid, nil, map[string]interface{}{
 			"level": "status",
 			"Code":  "NetStream.Play.Reset",
 		})
@@ -572,7 +588,7 @@ func (c *Conn) handleCommandMessagePlay(msg *rtmp.Message) (err error) {
 			return
 		}
 	}
-	msg.InitCommandMessage("onStatus", 0, nil, map[string]interface{}{
+	msg.InitCommandMessage("onStatus", tid, nil, map[string]interface{}{
 		"level": "status",
 		"Code":  "NetStream.Play.Start",
 	})
@@ -591,7 +607,6 @@ func (c *Conn) handleCommandMessagePlay(msg *rtmp.Message) (err error) {
 }
 
 func (c *Conn) handleCommandMessageCreateStream(msg *rtmp.Message) (err error) {
-	log.Debug("command message.'createStream'")
 	var amf interface{}
 	// transaction id
 	amf, err = rtmp.ReadAMF(&msg.Data)
@@ -613,11 +628,10 @@ func (c *Conn) handleCommandMessageCreateStream(msg *rtmp.Message) (err error) {
 }
 
 func (c *Conn) handleCommandMessageCall(msg *rtmp.Message) (err error) {
-	return fmt.Errorf("command message.'call' unsupported")
+	return
 }
 
 func (c *Conn) handleCommandMessageConnect(msg *rtmp.Message) (err error) {
-	log.Debug("command message.'connect'")
 	var amf interface{}
 	// transaction id
 	amf, err = rtmp.ReadAMF(&msg.Data)
@@ -680,36 +694,29 @@ func (c *Conn) handleCommandMessageConnect(msg *rtmp.Message) (err error) {
 }
 
 func (c *Conn) handleUserControlMessagePingResponse(data []byte) (err error) {
-	log.Debug("user control message.'pingResponse'")
 	return
 }
 
 func (c *Conn) handleUserControlMessagePingRequest(data []byte) (err error) {
-	log.Debug("user control message.'pingRequest'")
 	return
 }
 
 func (c *Conn) handleUserControlMessageStreamIsRecorded(data []byte) (err error) {
-	log.Debug("user control message.'streamIsRecorded'")
 	return
 }
 
 func (c *Conn) handleUserControlMessageSetBufferLength(data []byte) (err error) {
-	log.Debug("user control message.'setBufferLength'")
 	return
 }
 
 func (c *Conn) handleUserControlMessageStreamDry(data []byte) (err error) {
-	log.Debug("user control message.'streamDry'")
 	return
 }
 
 func (c *Conn) handleUserControlMessageStreamEOF(data []byte) (err error) {
-	log.Debug("user control message.'streamEOF'")
 	return
 }
 
 func (c *Conn) handleUserControlMessageStreamBegin(data []byte) (err error) {
-	log.Debug("user control message.'streamBegin'")
 	return
 }

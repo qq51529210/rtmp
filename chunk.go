@@ -12,14 +12,14 @@ const (
 )
 
 type ChunkHeader struct {
-	FMT              uint8
-	CSID             uint32 // chunk stream id
-	MessageTimestamp uint32 // 3字节，在fmt1和fmt2中表示delta
-	MessageLength    uint32 // 3字节
-	MessageTypeID    uint8  // 1字节
-	MessageStreamID  uint32 // 4字节
-	// ExtendedTimestamp uint32   // MessageTimestamp=0xffffff才会启用
-	buff [11]byte // basic3+message11+extended_timestamp4
+	FMT               uint8
+	CSID              uint32   // chunk stream id
+	MessageTimestamp  uint32   // 3字节，在fmt1和fmt2中表示delta
+	MessageLength     uint32   // 3字节
+	MessageTypeID     uint8    // 1字节
+	MessageStreamID   uint32   // 4字节
+	ExtendedTimestamp uint32   // 4字节
+	buff              [11]byte // basic3+message11+extended_timestamp4
 }
 
 // 从r中读取chunk header
@@ -118,25 +118,15 @@ func (c *ChunkHeader) Write(w io.Writer) (err error) {
 	if err != nil {
 		return
 	}
+	// message header
+	err = c.writeMessageHeader(w)
+	if err != nil {
+		return
+	}
 	// extended timestamp
-	if c.MessageTimestamp >= MaxMessageTimestamp {
-		// c.ExtendedTimestamp = c.MessageTimestamp
-		extendedTimestamp := c.MessageTimestamp
-		c.MessageTimestamp = MaxMessageTimestamp
-		// message header
-		err = c.writeMessageHeader(w)
-		c.MessageTimestamp = extendedTimestamp
-		if err != nil {
-			return
-		}
-		binary.BigEndian.PutUint32(c.buff[:], extendedTimestamp)
+	if c.FMT != 3 && c.ExtendedTimestamp > 0 {
+		binary.BigEndian.PutUint32(c.buff[:], c.ExtendedTimestamp)
 		_, err = w.Write(c.buff[:4])
-	} else {
-		// message header
-		err = c.writeMessageHeader(w)
-		if err != nil {
-			return
-		}
 	}
 	return
 }

@@ -39,7 +39,8 @@ type Stream struct {
 	timestamp uint32
 	head      *StreamData
 	tail      *StreamData
-	play      list.List
+	playConn  list.List
+	metaData  map[string]interface{}
 }
 
 func (s *Stream) AddData(isVideo bool, timestamp uint32, data []byte) {
