@@ -3,6 +3,7 @@ package rtmp
 import (
 	"bytes"
 	"fmt"
+	"io"
 	"sync"
 )
 
@@ -105,10 +106,38 @@ func (m *Message) WriteBigEndianUint32(n uint32) {
 	m.Data.WriteByte(byte(n))
 }
 
-func (m *Message) InitAMF(name string, values ...interface{}) {
-	m.Data.Reset()
-	WriteAMF(&m.Data, name)
-	for _, v := range values {
-		WriteAMF(&m.Data, v)
+func WriteMessage(writer io.Writer, chunkHeader *ChunkHeader, chunkSize uint32, data []byte) error {
+	// 第一个chunk
+	chunkHeader.FMT = 0
+	err := chunkHeader.Write(writer)
+	if err != nil {
+		return err
 	}
+	n := uint32(len(data))
+	if n > chunkSize {
+		n = chunkSize
+	}
+	_, err = writer.Write(data[:n])
+	if err != nil {
+		return err
+	}
+	data = data[n:]
+	// 其他的chunk
+	chunkHeader.FMT = 3
+	for len(data) > 0 {
+		err = chunkHeader.Write(writer)
+		if err != nil {
+			return err
+		}
+		n = uint32(len(data))
+		if n > chunkSize {
+			n = chunkSize
+		}
+		_, err = writer.Write(data[:n])
+		if err != nil {
+			return err
+		}
+		data = data[n:]
+	}
+	return nil
 }

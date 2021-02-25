@@ -1,8 +1,11 @@
 package main
 
 import (
+	"bytes"
 	"container/list"
 	"sync"
+
+	"github.com/qq51529210/rtmp"
 )
 
 var (
@@ -25,11 +28,11 @@ func PutStreamData(d *StreamData) {
 
 // 表示一块音/视频数据
 type StreamData struct {
-	IsVideo   bool        // 音/视频
-	Timestamp uint32      // 时间戳
-	Data      []byte      // 数据
-	Next      *StreamData // 下一块数据
-	count     int32       // 智能指针
+	IsVideo   bool         // 音/视频
+	Timestamp uint32       // 时间戳
+	Data      bytes.Buffer // 数据
+	Next      *StreamData  // 下一块数据
+	count     int32        // 智能指针
 }
 
 // 表示一块连续的音/视频数据块缓存
@@ -40,16 +43,16 @@ type Stream struct {
 	head      *StreamData
 	tail      *StreamData
 	playConn  list.List
-	metaData  map[string]interface{}
+	metaData  bytes.Buffer
 }
 
-func (s *Stream) AddData(isVideo bool, timestamp uint32, data []byte) {
+func (s *Stream) AddData(isVideo bool, msg *rtmp.Message) {
 	b := StreamDataPool.Get().(*StreamData)
 	b.count = 1
 	b.IsVideo = isVideo
-	b.Timestamp = timestamp
-	b.Data = b.Data[:0]
-	b.Data = append(b.Data, data...)
+	b.Timestamp = msg.Timestamp
+	b.Data.Reset()
+	b.Data.Write(msg.Data.Bytes())
 	s.lock.Lock()
 	if s.head == nil {
 		s.head = b

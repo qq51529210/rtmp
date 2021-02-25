@@ -32,6 +32,7 @@ func (s *Server) Listen() (err error) {
 	s.WindowAcknowledgeSize = 1024 * 500
 	s.BandWidth = 1024 * 500
 	s.BandWidthLimit = 2
+	s.ChunkSize = 4 * 1024
 	s.publishStream = make(map[string]*Stream)
 	s.running = true
 	for s.running {
@@ -49,38 +50,24 @@ func (s *Server) ServeConn(conn net.Conn) {
 	log.Debug(conn.RemoteAddr().String())
 	c := new(Conn)
 	c.server = s
-	c.conn = bufio.NewReadWriter(bufio.NewReader(conn), bufio.NewWriter(conn))
-	c.Conn = rtmp.NewConn(c.conn, rtmp.GetMessage)
+	c.receiveAudio = true
+	c.receiveVideo = true
+	c.reader = bufio.NewReader(conn)
+	c.writer = conn
 	defer func() {
 		if c.publishStream != nil {
 			s.DeleteStream(c.connectUrl.Path)
 		}
 		conn.Close()
-		for _, v := range c.GetMessages() {
-			rtmp.PutMessage(v)
-		}
 	}()
-	// 我已经按算法写了，但是obs的c2验证就是不通过，但是它能通过s2
 	_, err := rtmp.HandshakeAccept(conn, s.Version)
 	if err != nil {
 		log.Error(err)
 	}
-	var msg *rtmp.Message
-	for {
-		// 读取消息
-		msg, err = c.ReadMessage()
-		if err != nil {
-			log.Error(err)
-			return
-		}
-		// 处理消息
-		err = c.handleMessage(msg)
-		// 回收
-		rtmp.PutMessage(msg)
-		if err != nil {
-			log.Error(err)
-			return
-		}
+	err = c.readLoop()
+	if err != nil {
+		log.Error(err)
+		return
 	}
 }
 
@@ -98,6 +85,7 @@ func (s *Server) AddPublishStream(name string, timestamp uint32) (*Stream, bool)
 		stream = new(Stream)
 		stream.timestamp = timestamp
 		stream.Valid = true
+		s.publishStream[name] = stream
 	}
 	s.publishStreamLock.Unlock()
 	return stream, !ok

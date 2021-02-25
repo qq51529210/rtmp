@@ -123,7 +123,7 @@ func (c *ChunkHeader) Write(w io.Writer) (err error) {
 		return
 	}
 	// extended timestamp
-	if c.FMT != 3 && c.ExtendedTimestamp > 0 {
+	if c.FMT != 3 && c.MessageTimestamp == MaxMessageTimestamp {
 		binary.BigEndian.PutUint32(c.buff[:], c.ExtendedTimestamp)
 		_, err = w.Write(c.buff[:4])
 	}
