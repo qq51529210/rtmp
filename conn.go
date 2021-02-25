@@ -59,15 +59,9 @@ func (c *Conn) writeChunk(data []byte) ([]byte, error) {
 }
 
 // 写入一个消息
-func (c *Conn) WriteMessage(typeId uint8, streamId, timestamp, extTimestamp, csid uint32, data []byte) (err error) {
+func (c *Conn) WriteMessage(chunkHeader *ChunkHeader, data []byte) (err error) {
 	// 第一个chunk
 	c.writeChunkHeader.FMT = 0
-	c.writeChunkHeader.CSID = csid
-	c.writeChunkHeader.MessageTypeID = typeId
-	c.writeChunkHeader.MessageStreamID = streamId
-	c.writeChunkHeader.MessageTimestamp = timestamp
-	c.writeChunkHeader.ExtendedTimestamp = extTimestamp
-	c.writeChunkHeader.MessageLength = uint32(len(data))
 	data, err = c.writeChunk(data)
 	if err != nil {
 		return err
@@ -81,6 +75,28 @@ func (c *Conn) WriteMessage(typeId uint8, streamId, timestamp, extTimestamp, csi
 		}
 	}
 	return nil
+}
+
+func (c *Conn) WriteControlMessage(typeID uint8, data []byte) error {
+	c.writeChunkHeader.MessageTypeID = typeID
+	c.writeChunkHeader.MessageStreamID = ControlCommandMessageStreamID
+	c.writeChunkHeader.MessageTimestamp = 0
+	c.writeChunkHeader.ExtendedTimestamp = 0
+	c.writeChunkHeader.CSID = ControlMessageChunkStreamID
+	return c.WriteMessage(&c.writeChunkHeader, data)
+}
+
+func (c *Conn) WriteCommandMessage(data []byte) error {
+	c.writeChunkHeader.MessageTypeID = CommandMessageAMF0
+	c.writeChunkHeader.MessageStreamID = ControlCommandMessageStreamID
+	c.writeChunkHeader.MessageTimestamp = 0
+	c.writeChunkHeader.ExtendedTimestamp = 0
+	c.writeChunkHeader.CSID = CommandMessageChunkStreamID
+	return c.WriteMessage(&c.writeChunkHeader, data)
+}
+
+func (c *Conn) SetWriteChunkSize(size uint32) {
+	c.writeChunkSize = size
 }
 
 // 读取一个完整的消息并返回，Message使用后可以放回sync.Pool。内部已经处理ControlMessageXXX（1，2，3，5，6）。
@@ -149,6 +165,10 @@ func (c *Conn) ReadMessage() (*Message, error) {
 			}
 			// 读完整个消息了
 			if int(msg.Length) <= msg.Data.Len() {
+				err = c.checkWriteControlMessageAcknowledgement()
+				if err != nil {
+					return nil, err
+				}
 				// 处理控制消息
 				switch msg.TypeID {
 				case ControlMessageSetBandWidth:
@@ -186,12 +206,11 @@ func (c *Conn) ReadMessage() (*Message, error) {
 }
 
 // 检查是否需要发送ControlMessageAcknowledgement消息
-func (c *Conn) CheckWriteControlMessageAcknowledgement() error {
+func (c *Conn) checkWriteControlMessageAcknowledgement() error {
 	if c.windowAcknowledgeSize >= c.acknowledgement {
 		binary.BigEndian.PutUint32(c.ackMessageData[:], c.acknowledgement)
 		c.acknowledgement = 0
-		return c.WriteMessage(ControlMessageAcknowledgement, ControlCommandMessageStreamID,
-			ControlMessageChunkStreamID, 0, ControlMessageChunkStreamID, c.ackMessageData[:])
+		return c.WriteControlMessage(ControlMessageAcknowledgement, c.ackMessageData[:])
 	}
 	return nil
 }

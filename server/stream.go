@@ -63,7 +63,7 @@ func (s *Stream) AddData(isVideo bool, timestamp uint32, data []byte) {
 	if b.Timestamp-s.head.Timestamp >= s.timestamp {
 		h := s.head
 		s.head = s.head.Next
-		for ele := s.play.Front(); ele != nil; ele = ele.Next() {
+		for ele := s.playConn.Front(); ele != nil; ele = ele.Next() {
 			conn := ele.Value.(*Conn)
 			select {
 			case conn.playChan <- h:
@@ -77,23 +77,23 @@ func (s *Stream) AddData(isVideo bool, timestamp uint32, data []byte) {
 
 func (s *Stream) AddPlayConn(c *Conn) {
 	s.lock.Lock()
-	for ele := s.play.Front(); ele != nil; ele = ele.Next() {
+	for ele := s.playConn.Front(); ele != nil; ele = ele.Next() {
 		conn := ele.Value.(*Conn)
 		if conn == c {
 			s.lock.Unlock()
 			return
 		}
 	}
-	s.play.PushBack(c)
+	s.playConn.PushBack(c)
 	s.lock.Unlock()
 }
 
 func (s *Stream) RemovePlayConn(c *Conn) {
 	s.lock.Lock()
-	for ele := s.play.Front(); ele != nil; ele = ele.Next() {
+	for ele := s.playConn.Front(); ele != nil; ele = ele.Next() {
 		conn := ele.Value.(*Conn)
 		if conn == c {
-			s.play.Remove(ele)
+			s.playConn.Remove(ele)
 			close(conn.playChan)
 			s.lock.Unlock()
 			return

@@ -105,7 +105,8 @@ func (m *Message) WriteBigEndianUint32(n uint32) {
 	m.Data.WriteByte(byte(n))
 }
 
-func (m *Message) WriteAMF(name string, values ...interface{}) {
+func (m *Message) InitAMF(name string, values ...interface{}) {
+	m.Data.Reset()
 	WriteAMF(&m.Data, name)
 	for _, v := range values {
 		WriteAMF(&m.Data, v)

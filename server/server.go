@@ -10,17 +10,17 @@ import (
 )
 
 type Server struct {
-	Address           string
-	listener          net.Listener
-	running           bool
-	Timestamp         uint32
-	AckSize           uint32
-	BandWidth         uint32
-	BandWidthLimit    byte
-	MaxChunkSize      uint32
-	Version           uint32
-	publishStreamLock sync.RWMutex
-	publishStream     map[string]*Stream
+	Address               string
+	listener              net.Listener
+	running               bool
+	Timestamp             uint32
+	WindowAcknowledgeSize uint32
+	BandWidth             uint32
+	BandWidthLimit        byte
+	ChunkSize             uint32
+	Version               uint32
+	publishStreamLock     sync.RWMutex
+	publishStream         map[string]*Stream
 }
 
 func (s *Server) Listen() (err error) {
@@ -29,7 +29,7 @@ func (s *Server) Listen() (err error) {
 		return
 	}
 	s.Timestamp = 1000 * 2
-	s.AckSize = 1024 * 500
+	s.WindowAcknowledgeSize = 1024 * 500
 	s.BandWidth = 1024 * 500
 	s.BandWidthLimit = 2
 	s.publishStream = make(map[string]*Stream)
@@ -50,18 +50,37 @@ func (s *Server) ServeConn(conn net.Conn) {
 	c := new(Conn)
 	c.server = s
 	c.conn = bufio.NewReadWriter(bufio.NewReader(conn), bufio.NewWriter(conn))
-	c.msg.Init(s.AckSize, s.BandWidth, s.BandWidthLimit)
+	c.Conn = rtmp.NewConn(c.conn, rtmp.GetMessage)
 	defer func() {
 		if c.publishStream != nil {
 			s.DeleteStream(c.connectUrl.Path)
 		}
 		conn.Close()
+		for _, v := range c.GetMessages() {
+			rtmp.PutMessage(v)
+		}
 	}()
-	// 验证是不通过，但是不影响
-	rtmp.HandshakeAccept(conn, s.Version)
-	err := c.msg.ReadLoop(c.conn, c.handleMessage)
+	// 我已经按算法写了，但是obs的c2验证就是不通过，但是它能通过s2
+	_, err := rtmp.HandshakeAccept(conn, s.Version)
 	if err != nil {
 		log.Error(err)
+	}
+	var msg *rtmp.Message
+	for {
+		// 读取消息
+		msg, err = c.ReadMessage()
+		if err != nil {
+			log.Error(err)
+			return
+		}
+		// 处理消息
+		err = c.handleMessage(msg)
+		// 回收
+		rtmp.PutMessage(msg)
+		if err != nil {
+			log.Error(err)
+			return
+		}
 	}
 }
 

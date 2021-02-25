@@ -14,6 +14,7 @@ import (
 
 var (
 	messagePool sync.Pool
+	FMSVer      = "rtmp server v1.0"
 )
 
 func init() {
@@ -23,7 +24,7 @@ func init() {
 }
 
 type Conn struct {
-	msg           rtmp.MessageReader
+	*rtmp.Conn
 	conn          *bufio.ReadWriter
 	connectUrl    *url.URL
 	streamID      uint32
@@ -35,26 +36,38 @@ type Conn struct {
 	playChan      chan *StreamData
 }
 
-func (c *Conn) play(stream *Stream) {
+func (c *Conn) playLoop(stream *Stream) {
 	defer stream.RemovePlayConn(c)
 	var err error
-	var chunk rtmp.ChunkHeader
-	chunk.MessageStreamID = c.streamID
+	var chunkHeader rtmp.ChunkHeader
+	chunkHeader.MessageStreamID = c.streamID
 	for stream.Valid {
 		data, ok := <-c.playChan
 		if !ok {
 			return
 		}
+		if c.playPause {
+			continue
+		}
 		if data.IsVideo {
-			chunk.MessageTypeID = rtmp.VideoMessage
+			if !c.receiveVideo {
+				continue
+			}
+			chunkHeader.MessageTypeID = rtmp.VideoMessage
 		} else {
-			chunk.MessageTypeID = rtmp.AudioMessage
+			if !c.receiveAudio {
+				continue
+			}
+			chunkHeader.MessageTypeID = rtmp.AudioMessage
 		}
-		chunk.MessageTimestamp = data.Timestamp
-		if chunk.MessageTimestamp >= rtmp.MaxMessageTimestamp {
-			chunk.MessageTimestamp = rtmp.MaxMessageTimestamp
+		if data.Timestamp >= rtmp.MaxMessageTimestamp {
+			chunkHeader.MessageTimestamp = rtmp.MaxMessageTimestamp
+			chunkHeader.ExtendedTimestamp = data.Timestamp
+		} else {
+			chunkHeader.MessageTimestamp = data.Timestamp
+			chunkHeader.ExtendedTimestamp = 0
 		}
-		err = rtmp.WriteMessage(c.conn, &chunk, c.msg.RemoteChunkSize, data.Data)
+		err = c.Conn.WriteMessage(&chunkHeader, data.Data)
 		if err != nil {
 			log.Error(err)
 			break
@@ -188,11 +201,14 @@ func (c *Conn) handleCommandMessageMetaData(msg *rtmp.Message) (err error) {
 	if err != nil {
 		return
 	}
-	var commandObject map[string]interface{}
-	commandObject, ok = amf.(map[string]interface{})
+	metaData, ok := amf.(map[string]interface{})
 	if !ok {
-		return fmt.Errorf("command message.'connect'.'command object' invalid data type <%s>", reflect.TypeOf(amf).Kind().String())
+		return fmt.Errorf("command message.'onMetaData' invalid data type <%s>", reflect.TypeOf(amf).Kind().String())
 	}
+	if c.publishStream != nil {
+		c.publishStream.metaData = metaData
+	}
+	return nil
 }
 
 func (c *Conn) handleCommandMessagePause(msg *rtmp.Message) (err error) {
@@ -204,7 +220,7 @@ func (c *Conn) handleCommandMessagePause(msg *rtmp.Message) (err error) {
 	}
 	_, ok := amf.(float64)
 	if !ok {
-		return fmt.Errorf("command message.'pause'.'transactionID' invalid data type <%s>", reflect.TypeOf(amf).Kind().String())
+		return fmt.Errorf("command message.'pause'.'transaction id' invalid data type <%s>", reflect.TypeOf(amf).Kind().String())
 	}
 	// command object is nil
 	amf, err = rtmp.ReadAMF(&msg.Data)
@@ -221,10 +237,6 @@ func (c *Conn) handleCommandMessagePause(msg *rtmp.Message) (err error) {
 		return fmt.Errorf("command message.'pause'.'pause' invalid data type <%s>", reflect.TypeOf(amf).Kind().String())
 	}
 	// milliSeconds
-	amf, err = rtmp.ReadAMF(&msg.Data)
-	if err != nil {
-		return
-	}
 	return
 }
 
@@ -237,7 +249,7 @@ func (c *Conn) handleCommandMessageSeek(msg *rtmp.Message) (err error) {
 	}
 	_, ok := amf.(float64)
 	if !ok {
-		return fmt.Errorf("command message.'seek'.'transactionID' invalid data type <%s>", reflect.TypeOf(amf).Kind().String())
+		return fmt.Errorf("command message.'seek'.'transaction id' invalid data type <%s>", reflect.TypeOf(amf).Kind().String())
 	}
 	// command object is nil
 	amf, err = rtmp.ReadAMF(&msg.Data)
@@ -245,27 +257,19 @@ func (c *Conn) handleCommandMessageSeek(msg *rtmp.Message) (err error) {
 		return
 	}
 	// milliSeconds
-	amf, err = rtmp.ReadAMF(&msg.Data)
-	if err != nil {
-		return
-	}
-	_, ok = amf.(float64)
-	if !ok {
-		return fmt.Errorf("command message.'seek'.'milliSeconds' invalid data type <%s>", reflect.TypeOf(amf).Kind().String())
-	}
 	return
 }
 
 func (c *Conn) handleCommandMessagePublish(msg *rtmp.Message) (err error) {
 	var amf interface{}
+	// transaction id
 	amf, err = rtmp.ReadAMF(&msg.Data)
 	if err != nil {
 		return err
 	}
-	// transaction id
-	tid, ok := amf.(float64)
+	transactionID, ok := amf.(float64)
 	if !ok {
-		return fmt.Errorf("command message.'publish'.'transactionID' invalid data type <%s>", reflect.TypeOf(amf).Kind().String())
+		return fmt.Errorf("command message.'publish'.'transaction id' invalid data type <%s>", reflect.TypeOf(amf).Kind().String())
 	}
 	// command object is nil
 	amf, err = rtmp.ReadAMF(&msg.Data)
@@ -292,7 +296,7 @@ func (c *Conn) handleCommandMessagePublish(msg *rtmp.Message) (err error) {
 	}
 	if _type != "live" {
 		// 只支持直播类型的推流
-		msg.InitCommandMessage("onStatus", tid, nil, map[string]interface{}{
+		msg.InitAMF("onStatus", transactionID, nil, map[string]interface{}{
 			"level":       "error",
 			"code":        "NetStream.Publish.Error",
 			"description": "server only support live",
@@ -301,23 +305,26 @@ func (c *Conn) handleCommandMessagePublish(msg *rtmp.Message) (err error) {
 		c.publishStream, ok = c.server.AddPublishStream(c.connectUrl.Path, c.server.Timestamp)
 		if !ok {
 			// 已经有相同的流
-			msg.InitCommandMessage("onStatus", tid, nil, map[string]interface{}{
+			msg.InitAMF("onStatus", transactionID, nil, map[string]interface{}{
 				"level":       "error",
 				"code":        "NetStream.Publish.Error",
 				"description": "other stream is publishing",
 			})
+		} else {
+			msg.Data.Reset()
+			msg.WriteBigEndianUint16(rtmp.UserControlMessageStreamBegin)
+			msg.WriteBigEndianUint32(c.streamID)
+			err = c.Conn.WriteControlMessage(rtmp.UserControlMessage, msg.Data.Bytes())
+			if err != nil {
+				return
+			}
+			msg.InitAMF("onStatus", transactionID, nil, map[string]interface{}{
+				"level": "status",
+				"code":  "NetStream.Publish.Start",
+			})
 		}
-		msg.InitUserControlMessageStreamBegin(c.streamID)
-		err = msg.Write(c.conn, c.RemoteChunkSize)
-		if err != nil {
-			return
-		}
-		msg.InitCommandMessage("onStatus", tid, nil, map[string]interface{}{
-			"level": "status",
-			"code":  "NetStream.Publish.Start",
-		})
 	}
-	err = msg.Write(c.conn, c.RemoteChunkSize)
+	err = c.Conn.WriteCommandMessage(msg.Data.Bytes())
 	if err != nil {
 		return
 	}
@@ -325,53 +332,7 @@ func (c *Conn) handleCommandMessagePublish(msg *rtmp.Message) (err error) {
 }
 
 func (c *Conn) handleCommandMessageFCPublish(msg *rtmp.Message) (err error) {
-	var amf interface{}
-	amf, err = rtmp.ReadAMF(&msg.Data)
-	if err != nil {
-		return err
-	}
-	// transaction id
-	tid, ok := amf.(float64)
-	if !ok {
-		return fmt.Errorf("command message.'FCPublish'.'transactionID' invalid data type <%s>", reflect.TypeOf(amf).Kind().String())
-	}
-	// command object is nil
-	amf, err = rtmp.ReadAMF(&msg.Data)
-	if err != nil {
-		return err
-	}
-	// publishing name
-	amf, err = rtmp.ReadAMF(&msg.Data)
-	if err != nil {
-		return err
-	}
-	_, ok = amf.(string)
-	if !ok {
-		return fmt.Errorf("command message.'FCPublish'.'publishing name' invalid data type <%s>", reflect.TypeOf(amf).Kind().String())
-	}
-	c.publishStream, ok = c.server.AddPublishStream(c.connectUrl.Path, c.server.Timestamp)
-	if !ok {
-		// 已经有相同的流
-		msg.InitCommandMessage("onStatus", tid, nil, map[string]interface{}{
-			"level":       "error",
-			"code":        "NetStream.Publish.Error",
-			"description": "other stream is publishing",
-		})
-	}
-	msg.InitUserControlMessageStreamBegin(c.streamID)
-	err = msg.Write(c.conn, c.RemoteChunkSize)
-	if err != nil {
-		return
-	}
-	msg.InitCommandMessage("onStatus", tid, nil, map[string]interface{}{
-		"level": "status",
-		"code":  "NetStream.Publish.Start",
-	})
-	err = msg.Write(c.conn, c.RemoteChunkSize)
-	if err != nil {
-		return
-	}
-	return c.conn.Flush()
+	return
 }
 
 func (c *Conn) handleCommandMessageReceiveVideo(msg *rtmp.Message) (err error) {
@@ -383,7 +344,7 @@ func (c *Conn) handleCommandMessageReceiveVideo(msg *rtmp.Message) (err error) {
 	}
 	_, ok := amf.(float64)
 	if !ok {
-		return fmt.Errorf("command message.'receiveVideo'.'transactionID' invalid data type <%s>", reflect.TypeOf(amf).Kind().String())
+		return fmt.Errorf("command message.'receiveVideo'.'transaction id' invalid data type <%s>", reflect.TypeOf(amf).Kind().String())
 	}
 	// command object is nil
 	amf, err = rtmp.ReadAMF(&msg.Data)
@@ -411,7 +372,7 @@ func (c *Conn) handleCommandMessageReceiveAudio(msg *rtmp.Message) (err error) {
 	}
 	_, ok := amf.(float64)
 	if !ok {
-		return fmt.Errorf("command message.'receiveAudio'.'transactionID' invalid data type <%s>", reflect.TypeOf(amf).Kind().String())
+		return fmt.Errorf("command message.'receiveAudio'.'transaction id' invalid data type <%s>", reflect.TypeOf(amf).Kind().String())
 	}
 	// command object is nil
 	amf, err = rtmp.ReadAMF(&msg.Data)
@@ -439,31 +400,27 @@ func (c *Conn) handleCommandMessageCloseStream(msg *rtmp.Message) (err error) {
 }
 
 func (c *Conn) handleCommandMessageDeleteStream(msg *rtmp.Message) (err error) {
+	return
+}
+
+func (c *Conn) handleCommandMessageCreateStream(msg *rtmp.Message) (err error) {
 	var amf interface{}
 	// transaction id
 	amf, err = rtmp.ReadAMF(&msg.Data)
 	if err != nil {
-		return
+		return err
 	}
-	_, ok := amf.(float64)
+	transactionID, ok := amf.(float64)
 	if !ok {
-		return fmt.Errorf("command message.'deleteStream'.'transactionID' invalid data type <%s>", reflect.TypeOf(amf).Kind().String())
+		return fmt.Errorf("command message.'createStream'.'transaction id' invalid data type <%s>", reflect.TypeOf(amf).Kind().String())
 	}
-	// command object is nil
-	amf, err = rtmp.ReadAMF(&msg.Data)
+	c.streamID++
+	msg.InitAMF("_result", transactionID, nil, c.streamID)
+	err = c.Conn.WriteCommandMessage(msg.Data.Bytes())
 	if err != nil {
 		return
 	}
-	// stream id
-	amf, err = rtmp.ReadAMF(&msg.Data)
-	if err != nil {
-		return
-	}
-	_, ok = amf.(float64)
-	if !ok {
-		return fmt.Errorf("command message.'deleteStream'.'streamID' invalid data type <%s>", reflect.TypeOf(amf).Kind().String())
-	}
-	return
+	return c.conn.Flush()
 }
 
 func (c *Conn) handleCommandMessagePlay2(msg *rtmp.Message) (err error) {
@@ -475,7 +432,7 @@ func (c *Conn) handleCommandMessagePlay2(msg *rtmp.Message) (err error) {
 	}
 	_, ok := amf.(float64)
 	if !ok {
-		return fmt.Errorf("command message.'play2'.'transactionID' invalid data type <%s>", reflect.TypeOf(amf).Kind().String())
+		return fmt.Errorf("command message.'play2'.'transaction id' invalid data type <%s>", reflect.TypeOf(amf).Kind().String())
 	}
 	// command object is nil
 	amf, err = rtmp.ReadAMF(&msg.Data)
@@ -497,102 +454,43 @@ func (c *Conn) handleCommandMessagePlay(msg *rtmp.Message) (err error) {
 	if err != nil {
 		return
 	}
-	tid, ok := amf.(float64)
+	transactionID, ok := amf.(float64)
 	if !ok {
-		return fmt.Errorf("command message.'play'.'transactionID' invalid data type <%s>", reflect.TypeOf(amf).Kind().String())
-	}
-	// command object is nil
-	amf, err = rtmp.ReadAMF(&msg.Data)
-	if err != nil {
-		return
-	}
-	// stream name
-	amf, err = rtmp.ReadAMF(&msg.Data)
-	if err != nil {
-		return
-	}
-	_, ok = amf.(string)
-	if !ok {
-		return fmt.Errorf("command message.'play'.'streamName' invalid data type <%s>", reflect.TypeOf(amf).Kind().String())
-	}
-	// start
-	if msg.Data.Len() > 0 {
-		amf, err = rtmp.ReadAMF(&msg.Data)
-		if err != nil {
-			return
-		}
-		_, ok = amf.(float64)
-		if !ok {
-			return fmt.Errorf("command message.'play'.'start' invalid data type <%s>", reflect.TypeOf(amf).Kind().String())
-		}
-	}
-	// duration
-	if msg.Data.Len() > 0 {
-		amf, err = rtmp.ReadAMF(&msg.Data)
-		if err != nil {
-			return
-		}
-		_, ok = amf.(float64)
-		if !ok {
-			return fmt.Errorf("command message.'play'.'duration' invalid data type <%s>", reflect.TypeOf(amf).Kind().String())
-		}
-	}
-	// reset
-	reset := false
-	if msg.Data.Len() > 0 {
-		amf, err = rtmp.ReadAMF(&msg.Data)
-		if err != nil {
-			return
-		}
-		reset, ok = amf.(bool)
-		_, ok = amf.(float64)
-		if !ok {
-			return fmt.Errorf("command message.'play'.'reset' invalid data type <%s>", reflect.TypeOf(amf).Kind().String())
-		}
+		return fmt.Errorf("command message.'play'.'transaction id' invalid data type <%s>", reflect.TypeOf(amf).Kind().String())
 	}
 	stream := c.server.GetPublishStream(c.connectUrl.Path)
 	if stream == nil {
-		msg.InitCommandMessage("onStatus", tid, nil, map[string]interface{}{
+		msg.InitAMF("onStatus", transactionID, nil, map[string]interface{}{
 			"level": "error",
 			"Code":  "NetStream.Play.StreamNotFound",
 		})
-		err = msg.Write(c.conn, c.MessageReader.RemoteChunkSize)
+		err = c.Conn.WriteCommandMessage(msg.Data.Bytes())
 		if err != nil {
 			return
 		}
 		return c.conn.Flush()
 	}
-	//
-	msg.InitControlMessageSetChunkSize(c.RemoteChunkSize)
-	err = msg.Write(c.conn, c.MessageReader.RemoteChunkSize)
+	// 响应"Control Message Set Chunk Size"消息
+	msg.Data.Reset()
+	msg.WriteBigEndianUint32(c.server.ChunkSize)
+	err = c.Conn.WriteControlMessage(rtmp.ControlMessageSetChunkSize, msg.Data.Bytes())
 	if err != nil {
 		return
 	}
-	msg.InitUserControlMessageStreamIsRecorded(c.streamID)
-	err = msg.Write(c.conn, c.MessageReader.RemoteChunkSize)
+	c.Conn.SetWriteChunkSize(c.server.ChunkSize)
+	// 响应"User Control Message Stream Begin"消息
+	msg.Data.Reset()
+	msg.WriteBigEndianUint16(rtmp.UserControlMessageStreamBegin)
+	msg.WriteBigEndianUint32(c.streamID)
+	err = c.Conn.WriteControlMessage(rtmp.ControlMessageSetChunkSize, msg.Data.Bytes())
 	if err != nil {
 		return
 	}
-	msg.InitUserControlMessageStreamBegin(c.streamID)
-	err = msg.Write(c.conn, c.MessageReader.RemoteChunkSize)
-	if err != nil {
-		return
-	}
-	if reset {
-		msg.InitCommandMessage("onStatus", tid, nil, map[string]interface{}{
-			"level": "status",
-			"Code":  "NetStream.Play.Reset",
-		})
-		err = msg.Write(c.conn, c.MessageReader.RemoteChunkSize)
-		if err != nil {
-			return
-		}
-	}
-	msg.InitCommandMessage("onStatus", tid, nil, map[string]interface{}{
+	msg.InitAMF("onStatus", transactionID, nil, map[string]interface{}{
 		"level": "status",
 		"Code":  "NetStream.Play.Start",
 	})
-	err = msg.Write(c.conn, c.MessageReader.RemoteChunkSize)
+	err = c.Conn.WriteCommandMessage(msg.Data.Bytes())
 	if err != nil {
 		return
 	}
@@ -602,29 +500,8 @@ func (c *Conn) handleCommandMessagePlay(msg *rtmp.Message) (err error) {
 	}
 	c.playChan = make(chan *StreamData, 1)
 	stream.AddPlayConn(c)
-	go c.play(stream)
+	go c.playLoop(stream)
 	return
-}
-
-func (c *Conn) handleCommandMessageCreateStream(msg *rtmp.Message) (err error) {
-	var amf interface{}
-	// transaction id
-	amf, err = rtmp.ReadAMF(&msg.Data)
-	if err != nil {
-		return err
-	}
-	transactionID, ok := amf.(float64)
-	if !ok {
-		return fmt.Errorf("command message.'createStream'.'transactionID' invalid data type <%s>", reflect.TypeOf(amf).Kind().String())
-	}
-	msg.InitCommandMessage("_result", transactionID, nil, c.streamID)
-	err = msg.Write(c.conn, c.MessageReader.RemoteChunkSize)
-	if err != nil {
-		messagePool.Put(err)
-		return
-	}
-	c.streamID++
-	return c.conn.Flush()
 }
 
 func (c *Conn) handleCommandMessageCall(msg *rtmp.Message) (err error) {
@@ -640,7 +517,7 @@ func (c *Conn) handleCommandMessageConnect(msg *rtmp.Message) (err error) {
 	}
 	transactionID, ok := amf.(float64)
 	if !ok {
-		return fmt.Errorf("command message.'connect'.'transactionID' invalid data type <%s>", reflect.TypeOf(amf).Kind().String())
+		return fmt.Errorf("command message.'connect'.'transaction id' invalid data type <%s>", reflect.TypeOf(amf).Kind().String())
 	}
 	// command object
 	amf, err = rtmp.ReadAMF(&msg.Data)
@@ -661,32 +538,31 @@ func (c *Conn) handleCommandMessageConnect(msg *rtmp.Message) (err error) {
 	if err != nil {
 		return fmt.Errorf("command message.'connect'.'command object'.'tcUrl' <%s>", err.Error())
 	}
-	// optional user arguments
-	//
-	msg.InitControlMessageWindowAcknowledgementSize(c.server.AckSize)
-	err = msg.Write(c.conn, c.MessageReader.RemoteChunkSize)
+	// 响应"Window Acknowledgement Size"消息
+	msg.Data.Reset()
+	msg.WriteBigEndianUint32(c.server.WindowAcknowledgeSize)
+	err = c.Conn.WriteControlMessage(rtmp.ControlMessageWindowAcknowledgementSize, msg.Data.Bytes())
 	if err != nil {
 		return
 	}
-	msg.InitControlMessageSetBandWidth(c.server.BandWidth, c.server.BandWidthLimit)
-	err = msg.Write(c.conn, c.MessageReader.RemoteChunkSize)
+	// 响应"Control Message Set BandWidth"消息
+	msg.Data.Reset()
+	msg.WriteBigEndianUint32(c.server.BandWidth)
+	msg.Data.WriteByte(c.server.BandWidthLimit)
+	err = c.Conn.WriteControlMessage(rtmp.ControlMessageSetBandWidth, msg.Data.Bytes())
 	if err != nil {
 		return
 	}
-	msg.InitUserControlMessageStreamBegin(c.streamID)
-	err = msg.Write(c.conn, c.MessageReader.RemoteChunkSize)
-	if err != nil {
-		return
-	}
-	msg.InitCommandMessage("_result", transactionID, map[string]interface{}{
-		"fmsVer":       "FMS/3",
-		"capabilities": 13,
+	// 响应"Command Message _result"消息
+	msg.Data.Reset()
+	msg.InitAMF("_result", transactionID, map[string]interface{}{
+		"fmsVer": FMSVer,
 	}, map[string]interface{}{
 		"level":          "status",
 		"code":           "NetConnection.Connect.Success",
 		"objectEncoding": 0,
 	})
-	err = msg.Write(c.conn, c.MessageReader.RemoteChunkSize)
+	err = c.Conn.WriteCommandMessage(msg.Data.Bytes())
 	if err != nil {
 		return
 	}
