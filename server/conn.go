@@ -29,24 +29,82 @@ type Conn struct {
 	server                *Server
 	reader                io.Reader
 	writer                io.Writer
-	readChunkSize         uint32                   // 接收消息的一个chunk的大小
-	writeChunkSize        uint32                   // 发送消息的一个chunk的大小
-	readMessage           map[uint32]*rtmp.Message // 所有正在读取的消息
-	lastMessage           rtmp.Message             // 上一个完整的消息
-	syncChunkHeader       rtmp.ChunkHeader         // 同步消息使用
-	syncMessageBuffer     bytes.Buffer             // 同步消息缓存，以便一次发出多条
-	ackMessageData        [4]byte                  // ack消息的缓存
-	acknowledgement       uint32                   // 收到的消息数据的大小
-	windowAcknowledgeSize uint32                   // control.set_acknowledge_size
-	bandWidth             uint32                   // control.set_bandWidth.bandwidth
-	bandWidthLimit        byte                     // control.set_bandWidth.limit
-	connectUrl            *url.URL                 // command.connect.tcUrl
-	streamID              uint32                   // command.createStream
-	publishStream         *Stream                  // command.publish
-	receiveVideo          bool                     // command.receiveVideo
-	receiveAudio          bool                     // command.receiveAudio
-	playPause             bool                     // command.pause
-	playChan              chan *StreamData         // 接收publish的数据
+	readMessage           map[uint32]*rtmp.Message
+	readChunkSize         uint32           // 接收消息的一个chunk的大小
+	writeChunkSize        uint32           // 发送消息的一个chunk的大小
+	syncChunkHeader       rtmp.ChunkHeader // 同步消息使用
+	syncMessageBuffer     bytes.Buffer     // 同步消息缓存，以便一次发出多条
+	acknowledgement       uint32           // 收到的消息数据的大小
+	windowAcknowledgeSize uint32           // 接收消息的值
+	bandWidth             uint32           // 接收消息的值
+	bandWidthLimit        byte             // 接收消息的值
+	connectUrl            *url.URL         // 接收消息的值
+	streamID              uint32           // createStream递增
+	publishStream         *Stream          // 接收消息的值
+	receiveVideo          bool             // 接收消息的值
+	receiveAudio          bool             // 接收消息的值
+	playPause             bool             // 接收消息的值
+	playChan              chan *StreamGOP  // 可以播放的数据
+}
+
+// 播放，循环发送音视频数据
+func (c *Conn) playLoop(stream *Stream) {
+	defer stream.RemovePlayConn(c)
+	var err error
+	var chunk rtmp.ChunkHeader
+	var buff bytes.Buffer
+	var play = func(data *StreamData) error {
+		if c.playPause {
+			return nil
+		}
+		if data.typeID == rtmp.VideoMessage {
+			if !c.receiveVideo {
+				return nil
+			}
+			chunk.CSID = rtmp.VideoMessageChunkStreamID
+			chunk.MessageTypeID = rtmp.VideoMessage
+		} else {
+			if !c.receiveAudio {
+				return nil
+			}
+			chunk.CSID = rtmp.AudioMessageChunkStreamID
+			chunk.MessageTypeID = rtmp.AudioMessage
+		}
+		chunk.MessageStreamID = c.streamID
+		chunk.MessageLength = uint32(data.data.Len())
+		if data.timestamp >= rtmp.MaxMessageTimestamp {
+			chunk.MessageTimestamp = rtmp.MaxMessageTimestamp
+			chunk.ExtendedTimestamp = data.timestamp
+		} else {
+			chunk.MessageTimestamp = data.timestamp
+			chunk.ExtendedTimestamp = 0
+		}
+		buff.Reset()
+		rtmp.WriteMessage(&buff, &chunk, c.writeChunkSize, data.data.Bytes())
+		_, err = c.writer.Write(buff.Bytes())
+		return err
+	}
+	err = play(stream.avc)
+	if err != nil {
+		log.Error(err)
+		return
+	}
+	for stream.valid {
+		gop, ok := <-c.playChan
+		if !ok {
+			return
+		}
+		for ele := gop.data.Front(); ele != nil; ele = ele.Next() {
+			data := ele.Value.(*StreamData)
+			err = play(data)
+			if err != nil {
+				log.Error(err)
+				gop.Release()
+				return
+			}
+		}
+		gop.Release()
+	}
 }
 
 // 循环读取并处理消息
@@ -56,10 +114,16 @@ func (c *Conn) readLoop() (err error) {
 			rtmp.PutMessage(v)
 		}
 	}()
+	c.readMessage = make(map[uint32]*rtmp.Message)
+	var lastTypeID uint8
+	var lastStreamID uint32
+	var lastTimestamp uint32
+	var lastLength uint32
 	var n uint32
 	var ok bool
 	var msg *rtmp.Message
 	var chunk rtmp.ChunkHeader
+	var ackData [4]byte
 	for {
 		// chunk header
 		err = chunk.Read(c.reader)
@@ -80,6 +144,11 @@ func (c *Conn) readLoop() (err error) {
 			msg.Length = chunk.MessageLength
 			msg.TypeID = chunk.MessageTypeID
 			msg.StreamID = chunk.MessageStreamID
+			//
+			lastTimestamp = msg.Timestamp
+			lastLength = msg.Length
+			lastTypeID = msg.TypeID
+			lastStreamID = msg.StreamID
 		case 1:
 			if chunk.MessageTimestamp >= rtmp.MaxMessageTimestamp {
 				msg.Timestamp = chunk.ExtendedTimestamp
@@ -88,19 +157,28 @@ func (c *Conn) readLoop() (err error) {
 			}
 			msg.Length = chunk.MessageLength
 			msg.TypeID = chunk.MessageTypeID
+			//
+			lastTimestamp = msg.Timestamp
+			lastLength = msg.Length
+			lastTypeID = msg.TypeID
+			msg.StreamID = lastStreamID
 		case 2:
 			if chunk.MessageTimestamp >= rtmp.MaxMessageTimestamp {
 				msg.Timestamp = chunk.ExtendedTimestamp
 			} else {
 				msg.Timestamp += chunk.MessageTimestamp
 			}
+			lastTimestamp = msg.Timestamp
+			msg.Length = lastLength
+			msg.TypeID = lastTypeID
+			msg.StreamID = lastStreamID
 		default:
 			// 新的消息，那么以上一个消息作为模板
 			if !ok {
-				msg.TypeID = c.lastMessage.TypeID
-				msg.StreamID = c.lastMessage.StreamID
-				msg.Length = c.lastMessage.Length
-				msg.Timestamp = c.lastMessage.Timestamp
+				msg.Timestamp = lastTimestamp
+				msg.TypeID = lastTypeID
+				msg.StreamID = lastStreamID
+				msg.Length = lastLength
 			}
 		}
 		// chunk data
@@ -117,18 +195,18 @@ func (c *Conn) readLoop() (err error) {
 			if int(msg.Length) <= msg.Data.Len() {
 				// ack
 				c.acknowledgement += msg.Length
-				err = c.checkWriteControlMessageAcknowledgement()
-				if err != nil {
-					return
+				if c.windowAcknowledgeSize > 0 && c.acknowledgement >= c.windowAcknowledgeSize {
+					binary.BigEndian.PutUint32(ackData[:], c.acknowledgement)
+					c.acknowledgement = 0
+					c.syncMessageBuffer.Reset()
+					c.cacheControlMessage(rtmp.ControlMessageAcknowledgement, ackData[:])
+					_, err = c.writer.Write(c.syncMessageBuffer.Bytes())
+					if err != nil {
+						return
+					}
 				}
-				// 记录
-				c.lastMessage.TypeID = msg.TypeID
-				c.lastMessage.StreamID = msg.StreamID
-				c.lastMessage.Length = msg.Length
-				c.lastMessage.Timestamp = msg.Timestamp
 				// 处理
 				err = c.handleMessage(msg)
-				// 返回
 				if ok {
 					delete(c.readMessage, chunk.CSID)
 				}
@@ -146,143 +224,160 @@ func (c *Conn) readLoop() (err error) {
 	}
 }
 
-// 播放，循环发送音视频数据
-func (c *Conn) playLoop(stream *Stream) {
-	defer stream.RemovePlayConn(c)
-	var err error
-	var chunk rtmp.ChunkHeader
-	var buff bytes.Buffer
-	var play = func(data *StreamData) error {
-		if c.playPause {
-			return nil
-		}
-		if data.IsVideo {
-			if !c.receiveVideo {
-				return nil
-			}
-			chunk.CSID = rtmp.VideoMessage
-			chunk.MessageTypeID = rtmp.VideoMessage
-		} else {
-			if !c.receiveAudio {
-				return nil
-			}
-			chunk.CSID = rtmp.AudioMessage
-			chunk.MessageTypeID = rtmp.AudioMessage
-		}
-		chunk.MessageStreamID = c.streamID
-		chunk.MessageLength = uint32(data.Data.Len())
-		if data.Timestamp >= rtmp.MaxMessageTimestamp {
-			chunk.MessageTimestamp = data.Timestamp
-			chunk.ExtendedTimestamp = data.Timestamp
-		} else {
-			chunk.MessageTimestamp = data.Timestamp
-			chunk.ExtendedTimestamp = 0
-		}
-		rtmp.WriteMessage(&buff, &chunk, c.writeChunkSize, data.Data.Bytes())
-		_, err = c.writer.Write(buff.Bytes())
-		return err
-	}
-	for stream.Valid {
-		data, ok := <-c.playChan
-		if !ok {
-			return
-		}
-		err = play(data)
-		PutStreamData(data)
-		if err != nil {
-			log.Error(err)
-			return
-		}
-	}
+func (c *Conn) cacheControlMessage(typeID uint8, data []byte) {
+	c.syncChunkHeader.CSID = rtmp.ControlMessageChunkStreamID
+	c.syncChunkHeader.MessageTimestamp = 0
+	c.syncChunkHeader.MessageLength = uint32(len(data))
+	c.syncChunkHeader.MessageTypeID = typeID
+	c.syncChunkHeader.MessageStreamID = rtmp.ControlMessageStreamID
+	c.syncChunkHeader.ExtendedTimestamp = 0
+	rtmp.WriteMessage(&c.syncMessageBuffer, &c.syncChunkHeader, c.writeChunkSize, data)
+}
+
+func (c *Conn) cacheCommandMessage(data []byte) {
+	c.syncChunkHeader.CSID = rtmp.CommandMessageChunkStreamID
+	c.syncChunkHeader.MessageTimestamp = 0
+	c.syncChunkHeader.MessageLength = uint32(len(data))
+	c.syncChunkHeader.MessageTypeID = rtmp.CommandMessageAMF0
+	c.syncChunkHeader.MessageStreamID = rtmp.ControlMessageStreamID
+	c.syncChunkHeader.ExtendedTimestamp = 0
+	rtmp.WriteMessage(&c.syncMessageBuffer, &c.syncChunkHeader, c.writeChunkSize, data)
+}
+
+func (c *Conn) cacheDataMessage(data []byte) {
+	c.syncChunkHeader.CSID = rtmp.DataMessageChunkStreamID
+	c.syncChunkHeader.MessageTimestamp = 0
+	c.syncChunkHeader.MessageLength = uint32(len(data))
+	c.syncChunkHeader.MessageTypeID = rtmp.DataMessageAMF0
+	c.syncChunkHeader.MessageStreamID = c.streamID
+	c.syncChunkHeader.ExtendedTimestamp = 0
+	rtmp.WriteMessage(&c.syncMessageBuffer, &c.syncChunkHeader, c.writeChunkSize, data)
 }
 
 func (c *Conn) handleMessage(msg *rtmp.Message) error {
 	switch msg.TypeID {
 	case rtmp.ControlMessageSetBandWidth:
+		log.Debug("control message 'set bandwidth'")
 		return c.handleControlMessageSetBandWidth(msg)
 	case rtmp.ControlMessageWindowAcknowledgementSize:
+		log.Debug("control message 'window acknowledgement size'")
 		return c.handleControlMessageWindowAcknowledgementSize(msg)
 	case rtmp.ControlMessageAcknowledgement:
+		log.Debug("control message 'acknowledgement'")
 		return c.handleControlMessageAcknowledgement(msg)
 	case rtmp.ControlMessageAbort:
+		log.Debug("control message 'abort'")
 		return c.handleControlMessageAbort(msg)
 	case rtmp.ControlMessageSetChunkSize:
+		log.Debug("control message 'set chunk size'")
 		return c.handleControlMessageSetChunkSize(msg)
-	case rtmp.UserControlMessage:
-		if msg.Data.Len() < 2 {
-			return fmt.Errorf("user control message invalid length <%d>", msg.Data.Len())
-		}
-		p := msg.Data.Bytes()
-		event := binary.BigEndian.Uint16(p)
-		log.Debug(rtmp.UserControlMessageString(event))
-		return nil
 	case rtmp.CommandMessageAMF0:
-		amf, err := rtmp.ReadAMF(&msg.Data)
-		if err != nil {
-			return err
-		}
-		if name, ok := amf.(string); ok {
-			log.Printf(log.DebugLevel, 0, "command message '%s'", name)
-			switch name {
-			case "connect":
-				return c.handleCommandMessageConnect(msg)
-			case "createStream":
-				return c.handleCommandMessageCreateStream(msg)
-			case "play":
-				return c.handleCommandMessagePlay(msg)
-			case "receiveAudio":
-				return c.handleCommandMessageReceiveAudio(msg)
-			case "receiveVideo":
-				return c.handleCommandMessageReceiveVideo(msg)
-			case "publish":
-				return c.handleCommandMessagePublish(msg)
-			case "pause":
-				return c.handleCommandMessagePause(msg)
-			case "onMetaData":
-				return c.handleCommandMessageMetaData(msg)
-			default:
-				return nil
-			}
-		}
-		return fmt.Errorf("command message invalid 'name' data type <%s>", reflect.TypeOf(amf).Kind().String())
+		return c.handleCommandMessage(msg)
+	case rtmp.DataMessageAMF0:
+		log.Debug("data message amf0")
+		return c.handleDataMessage(msg)
 	case rtmp.AudioMessage:
+		// log.Debug("audio message")
 		return c.handleAudioMessage(msg)
 	case rtmp.VideoMessage:
+		// log.Debug("video message")
 		return c.handleVideoMessage(msg)
 	default:
-		log.Printf(log.DebugLevel, 0, "message type <%d>", msg.TypeID)
 		return nil
 	}
 }
 
 func (c *Conn) handleVideoMessage(msg *rtmp.Message) (err error) {
-	// log.Debug("video message")
-	c.publishStream.AddData(true, msg)
+	// 第一个是sps和pps
+	if c.publishStream.avc == nil {
+		c.publishStream.avc = StreamDataPool.Get().(*StreamData)
+		c.publishStream.avc.typeID = msg.TypeID
+		c.publishStream.avc.timestamp = msg.Timestamp
+		c.publishStream.avc.data.Reset()
+		c.publishStream.avc.data.Write(msg.Data.Bytes())
+	} else {
+		c.publishStream.AddData(msg)
+	}
 	return
 }
 
 func (c *Conn) handleAudioMessage(msg *rtmp.Message) (err error) {
-	// log.Debug("audio message")
-	c.publishStream.AddData(true, msg)
+	c.publishStream.AddData(msg)
 	return
 }
 
-func (c *Conn) handleCommandMessageMetaData(msg *rtmp.Message) (err error) {
-	var amf interface{}
-	amf, err = rtmp.ReadAMF(&msg.Data)
+func (c *Conn) handleCommandMessage(msg *rtmp.Message) error {
+	amf, err := rtmp.ReadAMF(&msg.Data)
 	if err != nil {
-		return
+		return err
 	}
-	metaData, ok := amf.(map[string]interface{})
-	if !ok {
-		return fmt.Errorf("command message.'onMetaData' invalid data type <%s>", reflect.TypeOf(amf).Kind().String())
+	if name, ok := amf.(string); ok {
+		log.Debug(fmt.Sprintf("command message '%s'", name))
+		switch name {
+		case "connect":
+			return c.handleCommandMessageConnect(msg)
+		case "createStream":
+			return c.handleCommandMessageCreateStream(msg)
+		case "play":
+			return c.handleCommandMessagePlay(msg)
+		case "receiveAudio":
+			return c.handleCommandMessageReceiveAudio(msg)
+		case "receiveVideo":
+			return c.handleCommandMessageReceiveVideo(msg)
+		case "publish":
+			return c.handleCommandMessagePublish(msg)
+		case "pause":
+			return c.handleCommandMessagePause(msg)
+		}
+		return nil
 	}
-	if c.publishStream != nil {
-		c.publishStream.metaData.Reset()
-		rtmp.WriteAMF(&c.publishStream.metaData, "onMetaData")
-		rtmp.WriteAMF(&c.publishStream.metaData, metaData)
+	return fmt.Errorf("command message invalid 'name' data type <%s>", reflect.TypeOf(amf).Kind().String())
+}
+
+// 这里有限定h264和acc
+func (c *Conn) handleDataMessage(msg *rtmp.Message) (err error) {
+	var amf interface{}
+	for msg.Data.Len() > 0 {
+		// onMetaData
+		amf, err = rtmp.ReadAMF(&msg.Data)
+		if err != nil {
+			return
+		}
+		if name, ok := amf.(string); ok && name == "onMetaData" {
+			amf, err = rtmp.ReadAMF(&msg.Data)
+			if err != nil {
+				return
+			}
+			metaData, ok := amf.(map[string]interface{})
+			if !ok {
+				return fmt.Errorf("data message.'onMetaData' invalid data type <%s>", reflect.TypeOf(amf).Kind().String())
+			}
+			// h264 avc
+			v := metaData["videocodecid"]
+			videoCodecID, ok := v.(float64)
+			if !ok {
+				return fmt.Errorf("data message.'onMetaData'.'videocodecid' invalid data type <%s>", reflect.TypeOf(amf).Kind().String())
+			}
+			if videoCodecID != 7 {
+				return fmt.Errorf("data message.'onMetaData'.'videocodecid' <%v> unsupported", videoCodecID)
+			}
+			// acc
+			v = metaData["audiocodecid"]
+			audioCodecID, ok := v.(float64)
+			if !ok {
+				return fmt.Errorf("data message.'onMetaData'.'audiocodecid' invalid data type <%s>", reflect.TypeOf(amf).Kind().String())
+			}
+			if audioCodecID != 10 {
+				return fmt.Errorf("data message.'onMetaData'.'audiocodecid' <%v> unsupported", audioCodecID)
+			}
+			if c.publishStream != nil {
+				c.publishStream.metaData.Reset()
+				rtmp.WriteAMF(&c.publishStream.metaData, "onMetaData")
+				rtmp.WriteAMF(&c.publishStream.metaData, metaData)
+			}
+		}
 	}
-	return nil
+	return
 }
 
 func (c *Conn) handleCommandMessagePause(msg *rtmp.Message) (err error) {
@@ -349,46 +444,35 @@ func (c *Conn) handleCommandMessagePublish(msg *rtmp.Message) (err error) {
 		return fmt.Errorf("command message.'publish'.'publishing type' invalid data type <%s>", reflect.TypeOf(amf).Kind().String())
 	}
 	c.syncMessageBuffer.Reset()
+	msg.Data.Reset()
 	if _type != "live" {
 		// 只支持直播类型的推流
-		msg.Data.Reset()
-		rtmp.WriteAMF(&msg.Data, "onStatus")
-		rtmp.WriteAMF(&msg.Data, transactionID)
-		rtmp.WriteAMF(&msg.Data, nil)
-		rtmp.WriteAMF(&msg.Data, map[string]interface{}{
+		rtmp.WriteAMFs(&msg.Data, "onStatus", transactionID, nil, map[string]interface{}{
 			"level":       "error",
 			"code":        "NetStream.Publish.Error",
-			"description": "server only support live",
+			"description": "other stream is publishing",
 		})
 	} else {
 		c.publishStream, ok = c.server.AddPublishStream(c.connectUrl.Path, c.server.Timestamp)
 		if !ok {
 			// 已经有相同的流
-			msg.Data.Reset()
-			rtmp.WriteAMF(&msg.Data, "onStatus")
-			rtmp.WriteAMF(&msg.Data, transactionID)
-			rtmp.WriteAMF(&msg.Data, nil)
-			rtmp.WriteAMF(&msg.Data, map[string]interface{}{
+			rtmp.WriteAMFs(&msg.Data, "onStatus", transactionID, nil, map[string]interface{}{
 				"level":       "error",
 				"code":        "NetStream.Publish.Error",
 				"description": "other stream is publishing",
 			})
 		} else {
+			msg.WriteB16(rtmp.UserControlMessageStreamBegin)
+			msg.WriteB32(c.streamID)
+			c.cacheControlMessage(rtmp.UserControlMessage, msg.Data.Bytes())
 			msg.Data.Reset()
-			msg.WriteBigEndianUint16(rtmp.UserControlMessageStreamBegin)
-			msg.WriteBigEndianUint32(c.streamID)
-			c.InitControlMessage(rtmp.UserControlMessage, msg.Data.Bytes())
-			msg.Data.Reset()
-			rtmp.WriteAMF(&msg.Data, "onStatus")
-			rtmp.WriteAMF(&msg.Data, transactionID)
-			rtmp.WriteAMF(&msg.Data, nil)
-			rtmp.WriteAMF(&msg.Data, map[string]interface{}{
+			rtmp.WriteAMFs(&msg.Data, "onStatus", transactionID, nil, map[string]interface{}{
 				"level": "status",
 				"code":  "NetStream.Publish.Start",
 			})
 		}
 	}
-	c.InitCommandMessage(msg.Data.Bytes())
+	c.cacheCommandMessage(msg.Data.Bytes())
 	_, err = c.writer.Write(c.syncMessageBuffer.Bytes())
 	return
 }
@@ -449,18 +533,6 @@ func (c *Conn) handleCommandMessageReceiveAudio(msg *rtmp.Message) (err error) {
 	return
 }
 
-func (c *Conn) handleCommandMessageReleaseStream(msg *rtmp.Message) (err error) {
-	return
-}
-
-func (c *Conn) handleCommandMessageCloseStream(msg *rtmp.Message) (err error) {
-	return
-}
-
-func (c *Conn) handleCommandMessageDeleteStream(msg *rtmp.Message) (err error) {
-	return
-}
-
 func (c *Conn) handleCommandMessageCreateStream(msg *rtmp.Message) (err error) {
 	var amf interface{}
 	// transaction id
@@ -475,11 +547,8 @@ func (c *Conn) handleCommandMessageCreateStream(msg *rtmp.Message) (err error) {
 	c.streamID++
 	c.syncMessageBuffer.Reset()
 	msg.Data.Reset()
-	rtmp.WriteAMF(&msg.Data, "_result")
-	rtmp.WriteAMF(&msg.Data, transactionID)
-	rtmp.WriteAMF(&msg.Data, nil)
-	rtmp.WriteAMF(&msg.Data, c.streamID)
-	c.InitCommandMessage(msg.Data.Bytes())
+	rtmp.WriteAMFs(&msg.Data, "_result", transactionID, nil, c.streamID)
+	c.cacheCommandMessage(msg.Data.Bytes())
 	_, err = c.writer.Write(c.syncMessageBuffer.Bytes())
 	return
 }
@@ -517,52 +586,42 @@ func (c *Conn) handleCommandMessagePlay(msg *rtmp.Message) (err error) {
 		stream = c.server.GetPublishStream(c.connectUrl.Path)
 	}
 	c.syncMessageBuffer.Reset()
+	msg.Data.Reset()
 	if stream == nil {
-		msg.Data.Reset()
-		rtmp.WriteAMF(&msg.Data, "onStatus")
-		rtmp.WriteAMF(&msg.Data, transactionID)
-		rtmp.WriteAMF(&msg.Data, nil)
-		rtmp.WriteAMF(&msg.Data, map[string]interface{}{
+		rtmp.WriteAMFs(&msg.Data, "onStatus", transactionID, nil, map[string]interface{}{
 			"level": "error",
 			"Code":  "NetStream.Play.StreamNotFound",
 		})
-		c.InitCommandMessage(msg.Data.Bytes())
+		c.cacheCommandMessage(msg.Data.Bytes())
 		_, err = c.writer.Write(c.syncMessageBuffer.Bytes())
 		return
 	}
-	// 响应"Control Message Set Chunk Size"消息
-	msg.Data.Reset()
-	msg.WriteBigEndianUint32(c.server.ChunkSize)
-	c.InitControlMessage(rtmp.ControlMessageSetChunkSize, msg.Data.Bytes())
 	// 响应"User Control Message Stream Begin"消息
 	msg.Data.Reset()
-	msg.WriteBigEndianUint16(rtmp.UserControlMessageStreamBegin)
-	msg.WriteBigEndianUint32(c.streamID)
-	c.InitControlMessage(rtmp.UserControlMessage, msg.Data.Bytes())
+	msg.WriteB16(rtmp.UserControlMessageStreamBegin)
+	msg.WriteB32(c.streamID)
+	c.cacheControlMessage(rtmp.UserControlMessage, msg.Data.Bytes())
 	// 响应"Command Message onStatus"消息
 	msg.Data.Reset()
-	rtmp.WriteAMF(&msg.Data, "onStatus")
-	rtmp.WriteAMF(&msg.Data, transactionID)
-	rtmp.WriteAMF(&msg.Data, nil)
-	rtmp.WriteAMF(&msg.Data, map[string]interface{}{
+	rtmp.WriteAMFs(&msg.Data, "onStatus", transactionID, nil, map[string]interface{}{
 		"level": "status",
 		"Code":  "NetStream.Play.Start",
 	})
-	c.InitCommandMessage(msg.Data.Bytes())
+	c.cacheCommandMessage(msg.Data.Bytes())
+	// 响应"Command Message |RtmpSampleAccess"消息
+	msg.Data.Reset()
+	rtmp.WriteAMFs(&msg.Data, "|RtmpSampleAccess", transactionID, true, true)
+	c.cacheCommandMessage(msg.Data.Bytes())
 	// 响应"Command Message onMetaData"消息
-	c.syncMessageBuffer.Write(stream.metaData.Bytes())
+	c.cacheDataMessage(stream.metaData.Bytes())
 	_, err = c.writer.Write(c.syncMessageBuffer.Bytes())
 	if err != nil {
 		return
 	}
-	// play
-	c.playChan = make(chan *StreamData, 1)
+	// play routine
+	c.playChan = make(chan *StreamGOP, 1)
 	stream.AddPlayConn(c)
 	go c.playLoop(stream)
-	return
-}
-
-func (c *Conn) handleCommandMessageCall(msg *rtmp.Message) (err error) {
 	return
 }
 
@@ -599,61 +658,29 @@ func (c *Conn) handleCommandMessageConnect(msg *rtmp.Message) (err error) {
 	c.syncMessageBuffer.Reset()
 	// 响应"Window Acknowledgement Size"消息
 	msg.Data.Reset()
-	msg.WriteBigEndianUint32(c.server.WindowAcknowledgeSize)
-	c.InitControlMessage(rtmp.ControlMessageWindowAcknowledgementSize, msg.Data.Bytes())
+	msg.WriteB32(c.server.WindowAcknowledgeSize)
+	c.cacheControlMessage(rtmp.ControlMessageWindowAcknowledgementSize, msg.Data.Bytes())
 	// 响应"Control Message Set BandWidth"消息
 	msg.Data.Reset()
-	msg.WriteBigEndianUint32(c.server.BandWidth)
+	msg.WriteB32(c.server.BandWidth)
 	msg.Data.WriteByte(c.server.BandWidthLimit)
-	c.InitControlMessage(rtmp.ControlMessageSetBandWidth, msg.Data.Bytes())
+	c.cacheControlMessage(rtmp.ControlMessageSetBandWidth, msg.Data.Bytes())
+	// 响应"Control Message Set Chunk Size"消息
+	msg.Data.Reset()
+	msg.WriteB32(c.server.ChunkSize)
+	c.cacheControlMessage(rtmp.ControlMessageSetChunkSize, msg.Data.Bytes())
+	c.writeChunkSize = c.server.ChunkSize
 	// 响应"Command Message _result"消息
 	msg.Data.Reset()
-	rtmp.WriteAMF(&msg.Data, "_result")
-	rtmp.WriteAMF(&msg.Data, transactionID)
-	rtmp.WriteAMF(&msg.Data, map[string]interface{}{
+	rtmp.WriteAMFs(&msg.Data, "_result", transactionID, map[string]interface{}{
 		"fmsVer": FMSVer,
-	})
-	rtmp.WriteAMF(&msg.Data, map[string]interface{}{
+	}, map[string]interface{}{
 		"level":          "status",
 		"code":           "NetConnection.Connect.Success",
 		"objectEncoding": 0,
 	})
-	c.InitCommandMessage(msg.Data.Bytes())
-	if err != nil {
-		return
-	}
+	c.cacheCommandMessage(msg.Data.Bytes())
 	_, err = c.writer.Write(c.syncMessageBuffer.Bytes())
-	return
-}
-
-func (c *Conn) InitControlMessage(typeID uint8, data []byte) {
-	c.syncChunkHeader.MessageTypeID = typeID
-	c.syncChunkHeader.MessageStreamID = rtmp.ControlCommandMessageStreamID
-	c.syncChunkHeader.MessageTimestamp = 0
-	c.syncChunkHeader.ExtendedTimestamp = 0
-	c.syncChunkHeader.CSID = rtmp.ControlMessageChunkStreamID
-	c.syncChunkHeader.MessageLength = uint32(len(data))
-	rtmp.WriteMessage(&c.syncMessageBuffer, &c.syncChunkHeader, c.writeChunkSize, data)
-}
-
-func (c *Conn) InitCommandMessage(data []byte) {
-	c.syncChunkHeader.MessageTypeID = rtmp.CommandMessageAMF0
-	c.syncChunkHeader.MessageStreamID = rtmp.ControlCommandMessageStreamID
-	c.syncChunkHeader.MessageTimestamp = 0
-	c.syncChunkHeader.ExtendedTimestamp = 0
-	c.syncChunkHeader.CSID = rtmp.CommandMessageChunkStreamID
-	c.syncChunkHeader.MessageLength = uint32(len(data))
-	rtmp.WriteMessage(&c.syncMessageBuffer, &c.syncChunkHeader, c.writeChunkSize, data)
-}
-
-// 检查是否需要发送ControlMessageAcknowledgement消息
-func (c *Conn) checkWriteControlMessageAcknowledgement() (err error) {
-	if c.windowAcknowledgeSize <= c.acknowledgement {
-		binary.BigEndian.PutUint32(c.ackMessageData[:], c.acknowledgement)
-		c.acknowledgement = 0
-		c.InitControlMessage(rtmp.ControlMessageAcknowledgement, c.ackMessageData[:])
-		_, err = c.writer.Write(c.syncMessageBuffer.Bytes())
-	}
 	return
 }
 

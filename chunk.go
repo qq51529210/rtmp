@@ -7,30 +7,36 @@ import (
 
 const (
 	MaxMessageTimestamp = 0xffffff
-	ChunkSize           = 128 // 默认的大小
 	MaxChunkSize        = 0xffffff
+	ChunkSize           = 128 // 默认的大小
+)
+
+const (
+	ChunkFmt0 = iota
+	ChunkFmt1
+	ChunkFmt2
+	ChunkFmt3
 )
 
 type ChunkHeader struct {
-	FMT               uint8
+	FMT               uint8    // 0:11，1:7，2:3，3:0
 	CSID              uint32   // chunk stream id
 	MessageTimestamp  uint32   // 3字节，在fmt1和fmt2中表示delta
 	MessageLength     uint32   // 3字节
 	MessageTypeID     uint8    // 1字节
 	MessageStreamID   uint32   // 4字节
 	ExtendedTimestamp uint32   // 4字节
-	buff              [11]byte // basic3+message11+extended_timestamp4
+	buff              [11]byte // basic:3+message:11+extended_timestamp:4
 }
 
-// 从r中读取chunk header
 func (c *ChunkHeader) Read(r io.Reader) (err error) {
-	// basic header
-	err = c.readBasicHeader(r)
+	// basic
+	err = c.ReadBaisc(r)
 	if err != nil {
 		return
 	}
-	// message header
-	err = c.readMessageHeader(r)
+	// message
+	err = c.ReadMessage(r)
 	if err != nil {
 		return
 	}
@@ -45,13 +51,14 @@ func (c *ChunkHeader) Read(r io.Reader) (err error) {
 	return
 }
 
-// 解析chunk basic header
-func (c *ChunkHeader) readBasicHeader(r io.Reader) (err error) {
+func (c *ChunkHeader) ReadBaisc(r io.Reader) (err error) {
+	// fmt
 	_, err = io.ReadFull(r, c.buff[:1])
 	if err != nil {
 		return
 	}
 	c.FMT = c.buff[0] >> 6
+	// csid
 	c.CSID = uint32(c.buff[0] & 0b00111111)
 	switch c.CSID {
 	case 0:
@@ -74,65 +81,83 @@ func (c *ChunkHeader) readBasicHeader(r io.Reader) (err error) {
 	return
 }
 
-// 解析chunk message header
-func (c *ChunkHeader) readMessageHeader(r io.Reader) (err error) {
-	// message header
+func (c *ChunkHeader) ReadMessage(r io.Reader) (err error) {
 	switch c.FMT {
-	case 0:
+	case ChunkFmt0:
 		// 11字节
 		_, err = io.ReadFull(r, c.buff[:])
 		if err != nil {
 			return
 		}
-		c.MessageTimestamp = bigEndianUint24(c.buff[0:])
-		c.MessageLength = bigEndianUint24(c.buff[3:])
+		c.MessageTimestamp = bUint24(c.buff[0:])
+		c.MessageLength = bUint24(c.buff[3:])
 		c.MessageTypeID = c.buff[6]
 		c.MessageStreamID = binary.LittleEndian.Uint32(c.buff[7:])
-	case 1:
+	case ChunkFmt1:
 		// 7字节
 		_, err = io.ReadFull(r, c.buff[:7])
 		if err != nil {
 			return
 		}
-		c.MessageTimestamp = bigEndianUint24(c.buff[0:])
-		c.MessageLength = bigEndianUint24(c.buff[3:])
+		c.MessageTimestamp = bUint24(c.buff[0:])
+		c.MessageLength = bUint24(c.buff[3:])
 		c.MessageTypeID = c.buff[6]
-	case 2:
+	case ChunkFmt2:
 		// 3字节
 		_, err = io.ReadFull(r, c.buff[:3])
 		if err != nil {
 			return
 		}
-		c.MessageTimestamp = bigEndianUint24(c.buff[:3])
-	default:
-		// 没有message header
+		c.MessageTimestamp = bUint24(c.buff[0:])
 	}
 	return
 }
 
-// 将chunk写到conn
+func (c *ChunkHeader) ReadExtendedTimestamp(r io.Reader) (err error) {
+	_, err = io.ReadFull(r, c.buff[:4])
+	if err != nil {
+		return
+	}
+	c.ExtendedTimestamp = binary.BigEndian.Uint32(c.buff[:4])
+	return
+}
+
+func (c *ChunkHeader) ReadFmt0Message(r io.Reader) (err error) {
+	// 11字节
+	_, err = io.ReadFull(r, c.buff[:11])
+	if err != nil {
+		return
+	}
+	c.MessageTimestamp = bUint24(c.buff[0:])
+	c.MessageLength = bUint24(c.buff[3:])
+	c.MessageTypeID = c.buff[6]
+	c.MessageStreamID = binary.LittleEndian.Uint32(c.buff[7:])
+	return
+}
+
+func (c *ChunkHeader) ReadFmt1Message(r io.Reader) (err error) {
+	// 7字节
+	_, err = io.ReadFull(r, c.buff[:7])
+	if err != nil {
+		return
+	}
+	c.MessageTimestamp = bUint24(c.buff[0:])
+	c.MessageLength = bUint24(c.buff[3:])
+	c.MessageTypeID = c.buff[6]
+	return
+}
+
+func (c *ChunkHeader) ReadFmt2Message(r io.Reader) (err error) {
+	// 3字节
+	_, err = io.ReadFull(r, c.buff[:3])
+	if err != nil {
+		return
+	}
+	c.MessageTimestamp = bUint24(c.buff[0:])
+	return
+}
+
 func (c *ChunkHeader) Write(w io.Writer) (err error) {
-	// basic header
-	err = c.writeBasicHeader(w)
-	if err != nil {
-		return
-	}
-	// message header
-	err = c.writeMessageHeader(w)
-	if err != nil {
-		return
-	}
-	// extended timestamp
-	if c.FMT != 3 && c.MessageTimestamp == MaxMessageTimestamp {
-		binary.BigEndian.PutUint32(c.buff[:], c.ExtendedTimestamp)
-		_, err = w.Write(c.buff[:4])
-	}
-	return
-}
-
-// 编码chunk basic header
-func (c *ChunkHeader) writeBasicHeader(w io.Writer) error {
-	var n int
 	// fmt
 	c.buff[0] = c.FMT << 6
 	// csid
@@ -140,43 +165,51 @@ func (c *ChunkHeader) writeBasicHeader(w io.Writer) error {
 		if c.CSID <= 319 {
 			// 2字节，[fmt+0][csid+64]
 			c.buff[1] = byte(c.CSID - 64)
-			n = 2
+			_, err = w.Write(c.buff[:2])
 		} else {
 			// 3字节，[fmt+1][csid+64][csid*256]
 			c.buff[0] |= 1
 			binary.LittleEndian.PutUint16(c.buff[1:], uint16(c.CSID-64))
-			n = 3
+			_, err = w.Write(c.buff[:3])
 		}
 	} else {
 		// 1字节，[fmt+csid]
 		c.buff[0] |= byte(c.CSID)
-		n = 1
+		_, err = w.Write(c.buff[:1])
 	}
-	_, err := w.Write(c.buff[:n])
-	return err
-}
-
-// 编码chunk message header
-func (c *ChunkHeader) writeMessageHeader(w io.Writer) error {
+	if err != nil {
+		return
+	}
+	// message
 	switch c.FMT {
-	case 0:
-		putBigEndianUint24(c.buff[0:], c.MessageTimestamp)
-		putBigEndianUint24(c.buff[3:], c.MessageLength)
+	case ChunkFmt0:
+		putBUint24(c.buff[0:], c.MessageTimestamp)
+		putBUint24(c.buff[3:], c.MessageLength)
 		c.buff[6] = c.MessageTypeID
 		binary.LittleEndian.PutUint32(c.buff[7:], c.MessageStreamID)
-		_, err := w.Write(c.buff[:11])
-		return err
-	case 1:
-		putBigEndianUint24(c.buff[0:], c.MessageTimestamp)
-		putBigEndianUint24(c.buff[3:], c.MessageLength)
+		_, err = w.Write(c.buff[:11])
+		if err != nil {
+			return
+		}
+	case ChunkFmt1:
+		putBUint24(c.buff[0:], c.MessageTimestamp)
+		putBUint24(c.buff[3:], c.MessageLength)
 		c.buff[6] = c.MessageTypeID
-		_, err := w.Write(c.buff[:7])
-		return err
-	case 2:
-		putBigEndianUint24(c.buff[0:], c.MessageTimestamp)
-		_, err := w.Write(c.buff[:3])
-		return err
-	default:
-		return nil
+		_, err = w.Write(c.buff[:7])
+		if err != nil {
+			return
+		}
+	case ChunkFmt2:
+		putBUint24(c.buff[0:], c.MessageTimestamp)
+		_, err = w.Write(c.buff[:3])
+		if err != nil {
+			return
+		}
 	}
+	// extended timestamp
+	if c.ExtendedTimestamp > 0 {
+		binary.BigEndian.PutUint32(c.buff[:], c.ExtendedTimestamp)
+		_, err = w.Write(c.buff[:4])
+	}
+	return
 }

@@ -18,89 +18,116 @@ func init() {
 	}
 }
 
-func PutStreamData(d *StreamData) {
-	d.count--
-	if d.count == 0 {
-		d.Next = nil
-		StreamDataPool.Put(d)
+// 表示一块音/视频数据
+type StreamData struct {
+	typeID    byte         // 音/视频
+	timestamp uint32       // 时间戳
+	data      bytes.Buffer // 数据
+	next      *StreamData  // 下一块数据
+}
+
+type StreamGOP struct {
+	data  list.List // 数据
+	count int32     // 智能指针
+}
+
+func (s *StreamGOP) Release() {
+	s.count--
+	if s.count > 0 {
+		return
+	}
+	s.recovery()
+}
+
+func (s *StreamGOP) recovery() {
+	for ele := s.data.Front(); ele != nil; ele = ele.Next() {
+		StreamDataPool.Put(ele.Value)
 	}
 }
 
-// 表示一块音/视频数据
-type StreamData struct {
-	IsVideo   bool         // 音/视频
-	Timestamp uint32       // 时间戳
-	Data      bytes.Buffer // 数据
-	Next      *StreamData  // 下一块数据
-	count     int32        // 智能指针
+func newStreamGOP(data interface{}) {
+	p := new(StreamGOP)
+	p.count = 1
+	p.data.PushBack(data)
 }
 
 // 表示一块连续的音/视频数据块缓存
 type Stream struct {
-	lock      sync.RWMutex
-	Valid     bool
-	timestamp uint32
-	head      *StreamData
-	tail      *StreamData
-	playConn  list.List
-	metaData  bytes.Buffer
+	lock     sync.Mutex
+	valid    bool
+	dataConn chan *StreamGOP
+	playConn list.List
+	metaData bytes.Buffer
+	gop      *StreamGOP
+	avc      *StreamData
+	acc      *StreamData
 }
 
-func (s *Stream) AddData(isVideo bool, msg *rtmp.Message) {
-	b := StreamDataPool.Get().(*StreamData)
-	b.count = 1
-	b.IsVideo = isVideo
-	b.Timestamp = msg.Timestamp
-	b.Data.Reset()
-	b.Data.Write(msg.Data.Bytes())
-	s.lock.Lock()
-	if s.head == nil {
-		s.head = b
-		s.tail = b
-	} else {
-		if s.tail != nil {
-			s.tail.Next = b
-		}
-		s.tail = b
+func (s *Stream) AddData(msg *rtmp.Message) {
+	data := StreamDataPool.Get().(*StreamData)
+	data.next = nil
+	data.typeID = msg.TypeID
+	data.timestamp = msg.Timestamp
+	data.data.Reset()
+	data.data.Write(msg.Data.Bytes())
+
+	if s.gop == nil {
+		s.gop = new(StreamGOP)
 	}
-	if b.Timestamp-s.head.Timestamp >= s.timestamp {
-		h := s.head
-		s.head = s.head.Next
-		for ele := s.playConn.Front(); ele != nil; ele = ele.Next() {
-			conn := ele.Value.(*Conn)
-			select {
-			case conn.playChan <- h:
-			default:
-			}
+	p := msg.Data.Bytes()
+	if p[0] == 0x17 {
+		// 关键帧
+		gop := s.gop
+		select {
+		case s.dataConn <- gop:
+		default:
+			gop.recovery()
 		}
+		s.gop = new(StreamGOP)
 	}
-	s.tail.Next = b
-	s.lock.Unlock()
+	s.gop.data.PushBack(data)
 }
 
 func (s *Stream) AddPlayConn(c *Conn) {
 	s.lock.Lock()
+	defer s.lock.Unlock()
 	for ele := s.playConn.Front(); ele != nil; ele = ele.Next() {
 		conn := ele.Value.(*Conn)
 		if conn == c {
-			s.lock.Unlock()
 			return
 		}
 	}
 	s.playConn.PushBack(c)
-	s.lock.Unlock()
 }
 
 func (s *Stream) RemovePlayConn(c *Conn) {
 	s.lock.Lock()
+	defer s.lock.Unlock()
 	for ele := s.playConn.Front(); ele != nil; ele = ele.Next() {
 		conn := ele.Value.(*Conn)
 		if conn == c {
 			s.playConn.Remove(ele)
 			close(conn.playChan)
-			s.lock.Unlock()
 			return
 		}
 	}
-	s.lock.Unlock()
+}
+
+func (s *Stream) Play() {
+	for s.valid {
+		data, ok := <-s.dataConn
+		if !ok {
+			return
+		}
+		s.lock.Lock()
+		for ele := s.playConn.Front(); ele != nil; ele = ele.Next() {
+			conn := ele.Value.(*Conn)
+			select {
+			case conn.playChan <- data:
+				data.count++
+			default:
+			}
+		}
+		s.lock.Unlock()
+	}
 }

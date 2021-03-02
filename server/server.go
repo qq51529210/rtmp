@@ -29,7 +29,7 @@ func (s *Server) Listen() (err error) {
 		return
 	}
 	s.Timestamp = 1000 * 2
-	s.WindowAcknowledgeSize = 1024 * 500
+	s.WindowAcknowledgeSize = 1024 * 5000
 	s.BandWidth = 1024 * 500
 	s.BandWidthLimit = 2
 	s.ChunkSize = 4 * 1024
@@ -50,6 +50,8 @@ func (s *Server) ServeConn(conn net.Conn) {
 	log.Debug(conn.RemoteAddr().String())
 	c := new(Conn)
 	c.server = s
+	c.readChunkSize = rtmp.ChunkSize
+	c.writeChunkSize = rtmp.ChunkSize
 	c.receiveAudio = true
 	c.receiveVideo = true
 	c.reader = bufio.NewReader(conn)
@@ -83,9 +85,10 @@ func (s *Server) AddPublishStream(name string, timestamp uint32) (*Stream, bool)
 	stream, ok := s.publishStream[name]
 	if !ok {
 		stream = new(Stream)
-		stream.timestamp = timestamp
-		stream.Valid = true
+		stream.valid = true
+		stream.dataConn = make(chan *StreamGOP, 1)
 		s.publishStream[name] = stream
+		go stream.Play()
 	}
 	s.publishStreamLock.Unlock()
 	return stream, !ok
@@ -96,17 +99,8 @@ func (s *Server) DeleteStream(name string) {
 	stream, ok := s.publishStream[name]
 	if ok {
 		delete(s.publishStream, name)
-		stream.Valid = false
+		stream.valid = false
+		close(stream.dataConn)
 	}
 	s.publishStreamLock.Unlock()
-	go func(stream *Stream) {
-		if stream == nil {
-			return
-		}
-		b := stream.head
-		for b != nil {
-			PutStreamData(b)
-			b = b.Next
-		}
-	}(stream)
 }
