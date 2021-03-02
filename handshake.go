@@ -229,7 +229,7 @@ func HandshakeAccept(conn io.ReadWriter, version uint32) (uint32, error) {
 }
 
 func handshakeComplexAccept(conn io.ReadWriter, buff []byte, version uint32) error {
-	c1Time := binary.BigEndian.Uint32(buff[1:])
+	// c1Time := binary.BigEndian.Uint32(buff[1:])
 	var c1Digest handshakeDigest
 	schema := handshakeCheckDigest(buff, c1Digest[:], &fpKey30Pool)
 	if schema < 0 {
@@ -251,9 +251,9 @@ func handshakeComplexAccept(conn io.ReadWriter, buff []byte, version uint32) err
 		return err
 	}
 	// s2
-	binary.BigEndian.PutUint32(buff[1:], c1Time)
-	binary.BigEndian.PutUint32(buff[5:], uint32(time.Now().Unix()))
-	mathRand.Read(buff[9:1505])
+	// binary.BigEndian.PutUint32(buff[1:], c1Time)
+	// binary.BigEndian.PutUint32(buff[5:], uint32(time.Now().Unix()))
+	mathRand.Read(buff[1:1505])
 	handshakeGenDigest2(buff, c1Digest[:], &fmsKeyPool)
 	_, err = conn.Write(buff[1:])
 	if err != nil {
@@ -267,10 +267,10 @@ func handshakeComplexAccept(conn io.ReadWriter, buff []byte, version uint32) err
 	if !handshakeCheckDigest2(buff, s1Digest[:], &fpKeyPool) {
 		return errDigestC2
 	}
-	c2Time := binary.BigEndian.Uint32(buff[1:])
-	if c2Time != s1Time {
-		return fmt.Errorf("c2 time <%d> no equal s1 time <%d>", c2Time, s1Time)
-	}
+	// c2Time := binary.BigEndian.Uint32(buff[1:])
+	// if c2Time != s1Time {
+	// 	return fmt.Errorf("c2 time <%d> no equal s1 time <%d>", c2Time, s1Time)
+	// }
 	return nil
 }
 
@@ -350,12 +350,12 @@ func handshakeComplexDial(conn io.ReadWriter, buff []byte, c1Time, version uint3
 	if schema < 0 {
 		return 0, errDigestS1
 	}
-	s1Time := binary.BigEndian.Uint32(buff[1:])
+	// s1Time := binary.BigEndian.Uint32(buff[1:])
 	s1Version := binary.BigEndian.Uint32(buff[5:])
 	// c2
-	binary.BigEndian.PutUint32(buff[1:], s1Time)
-	binary.BigEndian.PutUint32(buff[5:], uint32(time.Now().Unix()))
-	mathRand.Read(buff[9:1505])
+	// binary.BigEndian.PutUint32(buff[1:], s1Time)
+	// binary.BigEndian.PutUint32(buff[5:], uint32(time.Now().Unix()))
+	mathRand.Read(buff[1:1505])
 	handshakeGenDigest2(buff, s1Digest[:], &fpKeyPool)
 	_, err = conn.Write(buff[1:])
 	if err != nil {
@@ -369,9 +369,9 @@ func handshakeComplexDial(conn io.ReadWriter, buff []byte, c1Time, version uint3
 	if !handshakeCheckDigest2(buff, c1Digest[:], &fmsKeyPool) {
 		return 0, errDigestS2
 	}
-	s2Time1 := binary.BigEndian.Uint32(buff[1:])
-	if s2Time1 != c1Time {
-		return 0, fmt.Errorf("s2 time <%d> no equal c1 time <%d>", s2Time1, c1Time)
-	}
+	// s2Time1 := binary.BigEndian.Uint32(buff[1:])
+	// if s2Time1 != c1Time {
+	// 	return 0, fmt.Errorf("s2 time <%d> no equal c1 time <%d>", s2Time1, c1Time)
+	// }
 	return s1Version, nil
 }

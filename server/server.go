@@ -84,11 +84,8 @@ func (s *Server) AddPublishStream(name string, timestamp uint32) (*Stream, bool)
 	s.publishStreamLock.Lock()
 	stream, ok := s.publishStream[name]
 	if !ok {
-		stream = new(Stream)
-		stream.valid = true
-		stream.dataConn = make(chan *StreamGOP, 1)
+		stream = newStream()
 		s.publishStream[name] = stream
-		go stream.Play()
 	}
 	s.publishStreamLock.Unlock()
 	return stream, !ok

@@ -44,16 +44,20 @@ type Conn struct {
 	receiveVideo          bool             // 接收消息的值
 	receiveAudio          bool             // 接收消息的值
 	playPause             bool             // 接收消息的值
-	playChan              chan *StreamGOP  // 可以播放的数据
+	playChan              chan *StreamData // 可以播放的数据
+	vts                   uint32
+	ats                   uint32
 }
 
 // 播放，循环发送音视频数据
 func (c *Conn) playLoop(stream *Stream) {
 	defer stream.RemovePlayConn(c)
+	c.playChan = make(chan *StreamData, 1)
+	stream.AddPlayConn(c)
 	var err error
 	var chunk rtmp.ChunkHeader
 	var buff bytes.Buffer
-	var play = func(data *StreamData) error {
+	play := func(data *StreamData) error {
 		if c.playPause {
 			return nil
 		}
@@ -84,26 +88,32 @@ func (c *Conn) playLoop(stream *Stream) {
 		_, err = c.writer.Write(buff.Bytes())
 		return err
 	}
+	// playGOP := func(gop *StreamGOP) error {
+	// 	for ele := gop.data.Front(); ele != nil; ele = ele.Next() {
+	// 		data := ele.Value.(*StreamData)
+	// 		err := play(data)
+	// 		if err != nil {
+	// 			return err
+	// 		}
+	// 	}
+	// 	return nil
+	// }
 	err = play(stream.avc)
 	if err != nil {
 		log.Error(err)
 		return
 	}
 	for stream.valid {
-		gop, ok := <-c.playChan
+		data, ok := <-c.playChan
 		if !ok {
 			return
 		}
-		for ele := gop.data.Front(); ele != nil; ele = ele.Next() {
-			data := ele.Value.(*StreamData)
-			err = play(data)
-			if err != nil {
-				log.Error(err)
-				gop.Release()
-				return
-			}
+		err = play(data)
+		PutStreamData(data)
+		if err != nil {
+			log.Error(err)
+			return
 		}
-		gop.Release()
 	}
 }
 
@@ -153,7 +163,7 @@ func (c *Conn) readLoop() (err error) {
 			if chunk.MessageTimestamp >= rtmp.MaxMessageTimestamp {
 				msg.Timestamp = chunk.ExtendedTimestamp
 			} else {
-				msg.Timestamp += chunk.MessageTimestamp
+				msg.Timestamp = lastTimestamp + chunk.MessageTimestamp
 			}
 			msg.Length = chunk.MessageLength
 			msg.TypeID = chunk.MessageTypeID
@@ -166,7 +176,7 @@ func (c *Conn) readLoop() (err error) {
 			if chunk.MessageTimestamp >= rtmp.MaxMessageTimestamp {
 				msg.Timestamp = chunk.ExtendedTimestamp
 			} else {
-				msg.Timestamp += chunk.MessageTimestamp
+				msg.Timestamp = lastTimestamp + chunk.MessageTimestamp
 			}
 			lastTimestamp = msg.Timestamp
 			msg.Length = lastLength
@@ -288,21 +298,18 @@ func (c *Conn) handleMessage(msg *rtmp.Message) error {
 }
 
 func (c *Conn) handleVideoMessage(msg *rtmp.Message) (err error) {
-	// 第一个是sps和pps
-	if c.publishStream.avc == nil {
-		c.publishStream.avc = StreamDataPool.Get().(*StreamData)
-		c.publishStream.avc.typeID = msg.TypeID
-		c.publishStream.avc.timestamp = msg.Timestamp
-		c.publishStream.avc.data.Reset()
-		c.publishStream.avc.data.Write(msg.Data.Bytes())
-	} else {
-		c.publishStream.AddData(msg)
+	if c.publishStream == nil {
+		return fmt.Errorf("video message before publish")
 	}
+	c.publishStream.AddVideo(msg)
 	return
 }
 
 func (c *Conn) handleAudioMessage(msg *rtmp.Message) (err error) {
-	c.publishStream.AddData(msg)
+	if c.publishStream == nil {
+		return fmt.Errorf("audio message before publish")
+	}
+	c.publishStream.AddAudio(msg)
 	return
 }
 
@@ -619,8 +626,6 @@ func (c *Conn) handleCommandMessagePlay(msg *rtmp.Message) (err error) {
 		return
 	}
 	// play routine
-	c.playChan = make(chan *StreamGOP, 1)
-	stream.AddPlayConn(c)
 	go c.playLoop(stream)
 	return
 }
