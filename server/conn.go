@@ -43,7 +43,6 @@ type Conn struct {
 	publishStream         *Stream          // 接收消息的值
 	receiveVideo          bool             // 接收消息的值
 	receiveAudio          bool             // 接收消息的值
-	playPause             bool             // 接收消息的值
 	playChan              chan *StreamData // 可以播放的数据
 	vts                   uint32
 	ats                   uint32
@@ -56,49 +55,31 @@ func (c *Conn) playLoop(stream *Stream) {
 	stream.AddPlayConn(c)
 	var err error
 	var chunk rtmp.ChunkHeader
+	var lastVideoTimestap uint32
+	var lastAudioTimestap uint32
+	var lastVideoLength uint32
+	var lastAudioLength uint32
 	var buff bytes.Buffer
-	play := func(data *StreamData) error {
-		if c.playPause {
-			return nil
-		}
-		if data.typeID == rtmp.VideoMessage {
-			if !c.receiveVideo {
-				return nil
-			}
-			chunk.CSID = rtmp.VideoMessageChunkStreamID
-			chunk.MessageTypeID = rtmp.VideoMessage
-		} else {
-			if !c.receiveAudio {
-				return nil
-			}
-			chunk.CSID = rtmp.AudioMessageChunkStreamID
-			chunk.MessageTypeID = rtmp.AudioMessage
-		}
-		chunk.MessageStreamID = c.streamID
-		chunk.MessageLength = uint32(data.data.Len())
-		if data.timestamp >= rtmp.MaxMessageTimestamp {
-			chunk.MessageTimestamp = rtmp.MaxMessageTimestamp
-			chunk.ExtendedTimestamp = data.timestamp
-		} else {
-			chunk.MessageTimestamp = data.timestamp
-			chunk.ExtendedTimestamp = 0
-		}
-		buff.Reset()
-		rtmp.WriteMessage(&buff, &chunk, c.writeChunkSize, data.data.Bytes())
-		_, err = c.writer.Write(buff.Bytes())
-		return err
+	chunk.MessageStreamID = c.streamID
+	// 先发送h264的sps&pps
+	chunk.CSID = rtmp.VideoMessageChunkStreamID
+	chunk.MessageTypeID = rtmp.VideoMessage
+	chunk.MessageLength = uint32(stream.avc.data.Len())
+	chunk.FMT = rtmp.ChunkFmt0
+	rtmp.WriteMessage(&buff, &chunk, c.writeChunkSize, stream.avc.data.Bytes())
+	_, err = c.writer.Write(buff.Bytes())
+	if err != nil {
+		log.Error(err)
+		return
 	}
-	// playGOP := func(gop *StreamGOP) error {
-	// 	for ele := gop.data.Front(); ele != nil; ele = ele.Next() {
-	// 		data := ele.Value.(*StreamData)
-	// 		err := play(data)
-	// 		if err != nil {
-	// 			return err
-	// 		}
-	// 	}
-	// 	return nil
-	// }
-	err = play(stream.avc)
+	// acc
+	chunk.CSID = rtmp.AudioMessageChunkStreamID
+	chunk.MessageTypeID = rtmp.AudioMessage
+	chunk.MessageLength = uint32(stream.acc.data.Len())
+	chunk.FMT = rtmp.ChunkFmt0
+	buff.Reset()
+	rtmp.WriteMessage(&buff, &chunk, c.writeChunkSize, stream.acc.data.Bytes())
+	_, err = c.writer.Write(buff.Bytes())
 	if err != nil {
 		log.Error(err)
 		return
@@ -108,7 +89,50 @@ func (c *Conn) playLoop(stream *Stream) {
 		if !ok {
 			return
 		}
-		err = play(data)
+		// 接下来的chunk只要timestamp delta，fmt2就可以了
+		if data.typeID == rtmp.AudioMessage {
+			if !c.receiveAudio {
+				lastAudioLength = uint32(data.data.Len())
+				lastAudioTimestap = data.timestamp
+				PutStreamData(data)
+				continue
+			}
+			chunk.CSID = rtmp.AudioMessageChunkStreamID
+			chunk.MessageTypeID = rtmp.AudioMessage
+			chunk.MessageTimestamp = data.timestamp - lastAudioTimestap
+			if uint32(data.data.Len()) == lastAudioLength {
+				chunk.FMT = rtmp.ChunkFmt2
+			} else {
+				chunk.FMT = rtmp.ChunkFmt1
+			}
+			lastAudioLength = uint32(data.data.Len())
+			lastAudioTimestap = data.timestamp
+		} else {
+			if !c.receiveVideo {
+				lastVideoLength = uint32(data.data.Len())
+				lastVideoTimestap = data.timestamp
+				PutStreamData(data)
+				continue
+			}
+			chunk.CSID = rtmp.VideoMessageChunkStreamID
+			chunk.MessageTypeID = rtmp.VideoMessage
+			chunk.MessageTimestamp = data.timestamp - lastVideoTimestap
+			if uint32(data.data.Len()) == lastVideoLength {
+				chunk.FMT = rtmp.ChunkFmt2
+			} else {
+				chunk.FMT = rtmp.ChunkFmt1
+			}
+			lastVideoLength = uint32(data.data.Len())
+			lastVideoTimestap = data.timestamp
+		}
+		chunk.MessageLength = uint32(data.data.Len())
+		if chunk.MessageTimestamp >= rtmp.MaxMessageTimestamp {
+			chunk.ExtendedTimestamp = chunk.MessageTimestamp
+			chunk.MessageTimestamp = rtmp.MaxMessageTimestamp
+		}
+		buff.Reset()
+		rtmp.WriteMessage(&buff, &chunk, c.writeChunkSize, data.data.Bytes())
+		_, err = c.writer.Write(buff.Bytes())
 		PutStreamData(data)
 		if err != nil {
 			log.Error(err)
@@ -241,6 +265,7 @@ func (c *Conn) cacheControlMessage(typeID uint8, data []byte) {
 	c.syncChunkHeader.MessageTypeID = typeID
 	c.syncChunkHeader.MessageStreamID = rtmp.ControlMessageStreamID
 	c.syncChunkHeader.ExtendedTimestamp = 0
+	c.syncChunkHeader.FMT = rtmp.ChunkFmt0
 	rtmp.WriteMessage(&c.syncMessageBuffer, &c.syncChunkHeader, c.writeChunkSize, data)
 }
 
@@ -251,6 +276,7 @@ func (c *Conn) cacheCommandMessage(data []byte) {
 	c.syncChunkHeader.MessageTypeID = rtmp.CommandMessageAMF0
 	c.syncChunkHeader.MessageStreamID = rtmp.ControlMessageStreamID
 	c.syncChunkHeader.ExtendedTimestamp = 0
+	c.syncChunkHeader.FMT = rtmp.ChunkFmt0
 	rtmp.WriteMessage(&c.syncMessageBuffer, &c.syncChunkHeader, c.writeChunkSize, data)
 }
 
@@ -261,6 +287,7 @@ func (c *Conn) cacheDataMessage(data []byte) {
 	c.syncChunkHeader.MessageTypeID = rtmp.DataMessageAMF0
 	c.syncChunkHeader.MessageStreamID = c.streamID
 	c.syncChunkHeader.ExtendedTimestamp = 0
+	c.syncChunkHeader.FMT = rtmp.ChunkFmt0
 	rtmp.WriteMessage(&c.syncMessageBuffer, &c.syncChunkHeader, c.writeChunkSize, data)
 }
 
@@ -408,11 +435,17 @@ func (c *Conn) handleCommandMessagePause(msg *rtmp.Message) (err error) {
 	if err != nil {
 		return
 	}
-	c.playPause, ok = amf.(bool)
+	var pause bool
+	pause, ok = amf.(bool)
 	if !ok {
 		return fmt.Errorf("command message.'pause'.'pause' invalid data type <%s>", reflect.TypeOf(amf).Kind().String())
 	}
 	// milliSeconds
+	if pause {
+		c.publishStream.RemovePlayConn(c)
+	} else {
+		c.publishStream.AddPlayConn(c)
+	}
 	return
 }
 
@@ -509,6 +542,18 @@ func (c *Conn) handleCommandMessageReceiveVideo(msg *rtmp.Message) (err error) {
 	if !ok {
 		return fmt.Errorf("command message.'receiveVideo'.'bool' invalid data type <%s>", reflect.TypeOf(amf).Kind().String())
 	}
+	if c.receiveVideo {
+		// h264要发送sps和pps
+		c.syncChunkHeader.CSID = 10
+		c.syncChunkHeader.MessageTimestamp = 0
+		c.syncChunkHeader.MessageLength = uint32(c.publishStream.avc.data.Len())
+		c.syncChunkHeader.MessageTypeID = c.publishStream.avc.typeID
+		c.syncChunkHeader.MessageStreamID = c.streamID
+		c.syncChunkHeader.ExtendedTimestamp = 0
+		c.syncChunkHeader.FMT = rtmp.ChunkFmt0
+		rtmp.WriteMessage(&c.syncMessageBuffer, &c.syncChunkHeader, c.writeChunkSize, c.publishStream.avc.data.Bytes())
+		_, err = c.writer.Write(c.syncMessageBuffer.Bytes())
+	}
 	return
 }
 
@@ -537,6 +582,9 @@ func (c *Conn) handleCommandMessageReceiveAudio(msg *rtmp.Message) (err error) {
 	if !ok {
 		return fmt.Errorf("command message.'receiveAudio'.'bool' invalid data type <%s>", reflect.TypeOf(amf).Kind().String())
 	}
+	// if c.receiveAudio {
+	// 	// 其实acc不发送这个也行的
+	// }
 	return
 }
 

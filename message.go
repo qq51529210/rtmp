@@ -62,9 +62,9 @@ func PutMessage(msg *Message) {
 	msgPool.Put(msg)
 }
 
+// 将data分成chunk发送，注意设置chunk.fmt
 func WriteMessage(writer io.Writer, chunkHeader *ChunkHeader, chunkSize uint32, data []byte) error {
 	// 第一个chunk
-	chunkHeader.FMT = 0
 	err := chunkHeader.Write(writer)
 	if err != nil {
 		return err
@@ -79,7 +79,7 @@ func WriteMessage(writer io.Writer, chunkHeader *ChunkHeader, chunkSize uint32, 
 	}
 	data = data[n:]
 	// 其他的chunk
-	chunkHeader.FMT = 3
+	chunkHeader.FMT = ChunkFmt3
 	for len(data) > 0 {
 		err = chunkHeader.Write(writer)
 		if err != nil {
